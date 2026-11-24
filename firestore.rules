@@ -1,0 +1,986 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // GLOBAL PRIMITIVES & IDENTITY HELPERS
+    // =========================================================================
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function authEmailLower() {
+      return request.auth.token.email.lower();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailKey(key) {
+      return key is string && key.size() >= 3 && key.size() <= 160 && key.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function isValidLoginIdKey(key) {
+      return key is string && key.size() >= 2 && key.size() <= 80 && key.matches('^[a-zA-Z0-9._\\-]+$');
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidPermissionsList(perms) {
+      return perms is list
+        && perms.size() <= 40
+        && (perms.size() == 0 || perms[0] is string);
+    }
+
+    function isValidAccountStatus(val) {
+      return val in ['pending', 'active', 'inactive', 'suspended', 'disabled'];
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isVerifiedUser() && authEmailLower() == 'rexon.smc@gmail.com';
+    }
+
+    function userExists() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isUserDocActive(uData) {
+      return uData.status == 'active'
+        && (!('accountStatus' in uData) || uData.accountStatus == 'active');
+    }
+
+    function superAdminConfigExists() {
+      return exists(/databases/$(database)/documents/systemConfig/superAdmin);
+    }
+
+    function mainConfigExists() {
+      return exists(/databases/$(database)/documents/systemConfig/main);
+    }
+
+    function isSingletonSuperAdminUid() {
+      return (!mainConfigExists() || get(/databases/$(database)/documents/systemConfig/main).data.superAdminUid == request.auth.uid)
+        && (!superAdminConfigExists() || get(/databases/$(database)/documents/systemConfig/superAdmin).data.superAdminUid == request.auth.uid);
+    }
+
+    function isSuperAdmin() {
+      return isVerifiedUser() && (
+        (isBootstrappedSuperAdmin() && isSingletonSuperAdminUid()) ||
+        (mainConfigExists() && get(/databases/$(database)/documents/systemConfig/main).data.superAdminUid == request.auth.uid) ||
+        (superAdminConfigExists() && get(/databases/$(database)/documents/systemConfig/superAdmin).data.superAdminUid == request.auth.uid)
+      );
+    }
+
+    function isActiveSuperAdminStaff() {
+      return isVerifiedUser()
+        && userExists()
+        && getUserDoc().role == 'super_admin_staff'
+        && isUserDocActive(getUserDoc());
+    }
+
+    function hasSuperAdminStaffPerm(perm) {
+      return isActiveSuperAdminStaff() && (perm in getUserDoc().permissions);
+    }
+
+    function hasSuperAdminStaffAnyPerm(p1, p2) {
+      return isActiveSuperAdminStaff() && (p1 in getUserDoc().permissions || p2 in getUserDoc().permissions);
+    }
+
+    function isActiveOrgAdmin(orgId) {
+      return isVerifiedUser()
+        && userExists()
+        && getUserDoc().role == 'organization_admin'
+        && isUserDocActive(getUserDoc())
+        && getUserDoc().organizationId == orgId;
+    }
+
+    function isActiveOrgStaff(orgId) {
+      return isVerifiedUser()
+        && userExists()
+        && getUserDoc().role == 'organization_staff'
+        && isUserDocActive(getUserDoc())
+        && getUserDoc().organizationId == orgId;
+    }
+
+    function hasOrgStaffAnyPerm(orgId, p1, p2) {
+      return isActiveOrgStaff(orgId) && (p1 in getUserDoc().permissions || p2 in getUserDoc().permissions);
+    }
+
+    function isOrgMember(orgId) {
+      return isActiveOrgAdmin(orgId) || isActiveOrgStaff(orgId);
+    }
+
+    function orgExists(orgId) {
+      return exists(/databases/$(database)/documents/organizations/$(orgId));
+    }
+
+    function isOrgOperational(orgId) {
+      return orgExists(orgId)
+        && get(/databases/$(database)/documents/organizations/$(orgId)).data.accountStatus == 'active'
+        && get(/databases/$(database)/documents/organizations/$(orgId)).data.subscriptionStatus != 'Suspended';
+    }
+
+    // =========================================================================
+    // VALIDATION BLUEPRINTS
+    // =========================================================================
+
+    function isValidSystemConfigMain(data) {
+      return data.keys().hasAll(['superAdminUid', 'initialized', 'platformName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['superAdminUid', 'email', 'initialized', 'platformName', 'createdAt', 'updatedAt'])
+        && isValidId(data.superAdminUid)
+        && data.superAdminUid == request.auth.uid
+        && (!('email' in data) || (isValidString(data.email, 3, 160) && data.email.lower() == authEmailLower()))
+        && data.initialized == true
+        && isValidString(data.platformName, 2, 120)
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isValidSuperAdminSingleton(data) {
+      return data.keys().hasAll(['superAdminUid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['superAdminUid', 'email', 'createdAt'])
+        && isValidId(data.superAdminUid)
+        && data.superAdminUid == request.auth.uid
+        && isValidString(data.email, 3, 160)
+        && data.email.lower() == authEmailLower()
+        && data.createdAt == request.time;
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'permissions', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'fullName', 'phone', 'loginId',
+          'role', 'organizationId', 'organizationName', 'employeeId',
+          'designation', 'department', 'permissions', 'status', 'accountStatus',
+          'emailVerified', 'createdAt', 'updatedAt', 'lastLoginAt'
+        ])
+        && data.uid == uid
+        && isValidString(data.email, 3, 160)
+        && isValidString(data.displayName, 1, 120)
+        && (!('fullName' in data) || isValidString(data.fullName, 1, 120))
+        && (!('phone' in data) || isValidString(data.phone, 0, 40))
+        && (!('loginId' in data) || isValidString(data.loginId, 0, 80))
+        && data.role in ['super_admin', 'super_admin_staff', 'organization_admin', 'organization_staff']
+        && (!('organizationId' in data) || isValidString(data.organizationId, 0, 128))
+        && (!('organizationName' in data) || isValidString(data.organizationName, 0, 160))
+        && (!('employeeId' in data) || isValidString(data.employeeId, 0, 60))
+        && (!('designation' in data) || isValidString(data.designation, 0, 100))
+        && (!('department' in data) || isValidString(data.department, 0, 100))
+        && isValidPermissionsList(data.permissions)
+        && isValidAccountStatus(data.status)
+        && (!('accountStatus' in data) || isValidAccountStatus(data.accountStatus))
+        && (!('emailVerified' in data) || data.emailVerified is bool)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (!('lastLoginAt' in data) || data.lastLoginAt is timestamp);
+    }
+
+    function isValidInvitedAccount(data, emailKey) {
+      return data.keys().hasAll(['email', 'displayName', 'role', 'permissions', 'status', 'invitedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'email', 'displayName', 'phone', 'loginId', 'role',
+          'organizationId', 'organizationName', 'employeeId',
+          'designation', 'department', 'permissions', 'status',
+          'invitedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.email.lower() == emailKey.lower()
+        && isValidString(data.displayName, 1, 120)
+        && (!('phone' in data) || isValidString(data.phone, 0, 40))
+        && (!('loginId' in data) || isValidString(data.loginId, 0, 80))
+        && data.role in ['super_admin_staff', 'organization_admin', 'organization_staff']
+        && (!('organizationId' in data) || isValidString(data.organizationId, 0, 128))
+        && (!('organizationName' in data) || isValidString(data.organizationName, 0, 160))
+        && (!('employeeId' in data) || isValidString(data.employeeId, 0, 60))
+        && (!('designation' in data) || isValidString(data.designation, 0, 100))
+        && (!('department' in data) || isValidString(data.department, 0, 100))
+        && isValidPermissionsList(data.permissions)
+        && isValidAccountStatus(data.status)
+        && isValidId(data.invitedBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLoginDirectoryEntry(data, loginKey) {
+      return data.keys().hasAll(['loginId', 'email', 'role', 'accountStatus', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['loginId', 'email', 'uid', 'role', 'organizationId', 'accountStatus', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.loginId.lower() == loginKey.lower()
+        && isValidString(data.email, 3, 160)
+        && (!('uid' in data) || isValidString(data.uid, 0, 128))
+        && data.role in ['super_admin', 'super_admin_staff', 'organization_admin', 'organization_staff']
+        && (!('organizationId' in data) || isValidString(data.organizationId, 0, 128))
+        && isValidAccountStatus(data.accountStatus)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrganization(data, orgId) {
+      return data.keys().hasAll(['id', 'name', 'type', 'contactPerson', 'email', 'phone', 'address', 'adminLoginEmail', 'subscriptionStatus', 'accountStatus', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'organizationId', 'name', 'type', 'contactPerson', 'email', 'phone',
+          'address', 'adminLoginEmail', 'adminLoginId', 'adminUid',
+          'subscriptionPlanId', 'subscriptionPlanName', 'subscriptionStatus',
+          'subscriptionStartDate', 'subscriptionExpiryDate', 'accountStatus',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.id == orgId
+        && (!('organizationId' in data) || data.organizationId == orgId)
+        && isValidString(data.name, 2, 160)
+        && data.type in ['Company', 'Factory', 'Society', 'Apartment', 'Industry', 'Commercial Building', 'Other']
+        && isValidString(data.contactPerson, 2, 120)
+        && isValidString(data.email, 3, 160)
+        && isValidString(data.phone, 5, 40)
+        && isValidString(data.address, 3, 300)
+        && isValidString(data.adminLoginEmail, 3, 160)
+        && (!('adminLoginId' in data) || isValidString(data.adminLoginId, 0, 80))
+        && (!('adminUid' in data) || isValidString(data.adminUid, 0, 128))
+        && (!('subscriptionPlanId' in data) || isValidString(data.subscriptionPlanId, 0, 128))
+        && (!('subscriptionPlanName' in data) || isValidString(data.subscriptionPlanName, 0, 120))
+        && data.subscriptionStatus in ['Pending', 'Active', 'Expired', 'Suspended', 'Cancelled']
+        && (!('subscriptionStartDate' in data) || isValidString(data.subscriptionStartDate, 0, 40))
+        && (!('subscriptionExpiryDate' in data) || isValidString(data.subscriptionExpiryDate, 0, 40))
+        && isValidAccountStatus(data.accountStatus)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSuperAdminStaff(data, staffId) {
+      return data.keys().hasAll(['id', 'name', 'email', 'designation', 'department', 'assignedRole', 'permissions', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'uid', 'name', 'email', 'phone', 'loginId', 'designation', 'department', 'assignedRole', 'permissions', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == staffId
+        && (!('uid' in data) || isValidString(data.uid, 0, 128))
+        && isValidString(data.name, 2, 120)
+        && isValidString(data.email, 3, 160)
+        && (!('phone' in data) || isValidString(data.phone, 0, 40))
+        && (!('loginId' in data) || isValidString(data.loginId, 0, 80))
+        && isValidString(data.designation, 1, 100)
+        && isValidString(data.department, 1, 100)
+        && isValidString(data.assignedRole, 1, 100)
+        && isValidPermissionsList(data.permissions)
+        && isValidAccountStatus(data.status)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrgStaff(data, staffId) {
+      return data.keys().hasAll(['id', 'organizationId', 'employeeId', 'name', 'email', 'designation', 'department', 'role', 'permissions', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'uid', 'organizationId', 'employeeId', 'name', 'email', 'phone', 'loginId', 'designation', 'department', 'role', 'permissions', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == staffId
+        && (!('uid' in data) || isValidString(data.uid, 0, 128))
+        && isValidId(data.organizationId)
+        && isValidString(data.employeeId, 1, 60)
+        && isValidString(data.name, 2, 120)
+        && isValidString(data.email, 3, 160)
+        && (!('phone' in data) || isValidString(data.phone, 0, 40))
+        && (!('loginId' in data) || isValidString(data.loginId, 0, 80))
+        && isValidString(data.designation, 1, 100)
+        && isValidString(data.department, 1, 100)
+        && isValidString(data.role, 1, 100)
+        && isValidPermissionsList(data.permissions)
+        && isValidAccountStatus(data.status)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoleTemplate(data, roleId) {
+      return data.keys().hasAll(['id', 'organizationId', 'name', 'permissions', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'name', 'description', 'permissions', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == roleId
+        && isValidId(data.organizationId)
+        && isValidString(data.name, 2, 100)
+        && (!('description' in data) || isValidString(data.description, 0, 240))
+        && isValidPermissionsList(data.permissions)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSubscriptionPlan(data, planId) {
+      return data.keys().hasAll(['id', 'name', 'description', 'monthlyPrice', 'quarterlyPrice', 'halfYearlyPrice', 'yearlyPrice', 'features', 'maxStaff', 'maxSites', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'description', 'targetAudience', 'monthlyPrice', 'quarterlyPrice', 'halfYearlyPrice', 'yearlyPrice', 'features', 'maxStaff', 'maxSites', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == planId
+        && isValidString(data.name, 2, 100)
+        && isValidString(data.description, 4, 300)
+        && (!('targetAudience' in data) || isValidString(data.targetAudience, 0, 120))
+        && data.monthlyPrice is number && data.monthlyPrice >= 0
+        && data.quarterlyPrice is number && data.quarterlyPrice >= 0
+        && data.halfYearlyPrice is number && data.halfYearlyPrice >= 0
+        && data.yearlyPrice is number && data.yearlyPrice >= 0
+        && data.features is list && data.features.size() <= 20 && (data.features.size() == 0 || data.features[0] is string)
+        && data.maxStaff is number && data.maxStaff >= 1
+        && data.maxSites is number && data.maxSites >= 1
+        && data.status in ['active', 'inactive']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSubscription(data, subId) {
+      return data.keys().hasAll(['id', 'organizationId', 'planId', 'planName', 'billingCycle', 'status', 'startDate', 'expiryDate', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'organizationName', 'planId', 'planName', 'billingCycle', 'status', 'startDate', 'expiryDate', 'verifiedBy', 'createdAt', 'updatedAt'])
+        && data.id == subId
+        && isValidId(data.organizationId)
+        && (!('organizationName' in data) || isValidString(data.organizationName, 0, 160))
+        && isValidId(data.planId)
+        && isValidString(data.planName, 1, 100)
+        && data.billingCycle in ['monthly', 'quarterly', 'half_yearly', 'yearly']
+        && data.status in ['Pending', 'Active', 'Expired', 'Suspended', 'Cancelled']
+        && isValidString(data.startDate, 4, 40)
+        && isValidString(data.expiryDate, 4, 40)
+        && (!('verifiedBy' in data) || isValidString(data.verifiedBy, 0, 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPaymentRecord(data, paymentId) {
+      return data.keys().hasAll(['id', 'organizationId', 'organizationName', 'planId', 'planName', 'amount', 'currency', 'billingCycle', 'referenceCode', 'verificationStatus', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'organizationName', 'planId', 'planName', 'amount', 'currency', 'billingCycle', 'referenceCode', 'verificationStatus', 'verifiedBy', 'notes', 'createdAt', 'updatedAt'])
+        && data.id == paymentId
+        && isValidId(data.organizationId)
+        && isValidString(data.organizationName, 1, 160)
+        && isValidString(data.planId, 1, 128)
+        && isValidString(data.planName, 1, 100)
+        && data.amount is number && data.amount >= 0
+        && isValidString(data.currency, 1, 10)
+        && data.billingCycle in ['monthly', 'quarterly', 'half_yearly', 'yearly']
+        && isValidString(data.referenceCode, 2, 100)
+        && data.verificationStatus in ['Pending Verification', 'Verified', 'Rejected']
+        && (!('verifiedBy' in data) || isValidString(data.verifiedBy, 0, 128))
+        && (!('notes' in data) || isValidString(data.notes, 0, 300))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTower(data, towerId) {
+      return data.keys().hasAll(['id', 'organizationId', 'name', 'towerNumber', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'name', 'towerNumber', 'description', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == towerId
+        && isValidId(data.organizationId)
+        && isValidString(data.name, 1, 120)
+        && isValidString(data.towerNumber, 1, 40)
+        && (!('description' in data) || isValidString(data.description, 0, 300))
+        && data.status in ['active', 'inactive']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWing(data, wingId) {
+      return data.keys().hasAll(['id', 'organizationId', 'towerId', 'name', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'towerId', 'towerName', 'name', 'description', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == wingId
+        && isValidId(data.organizationId)
+        && isValidId(data.towerId)
+        && (!('towerName' in data) || isValidString(data.towerName, 0, 120))
+        && isValidString(data.name, 1, 120)
+        && (!('description' in data) || isValidString(data.description, 0, 300))
+        && data.status in ['active', 'inactive']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFlat(data, flatId) {
+      return data.keys().hasAll(['id', 'organizationId', 'towerId', 'wingId', 'flatNumber', 'floorNumber', 'flatType', 'ownerName', 'occupancyType', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'organizationId', 'towerId', 'towerName', 'wingId', 'wingName', 'flatNumber', 'floorNumber', 'flatType', 'ownerName', 'ownerContact', 'ownerEmail', 'occupancyType', 'tenantName', 'tenantContact', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.id == flatId
+        && isValidId(data.organizationId)
+        && isValidId(data.towerId)
+        && (!('towerName' in data) || isValidString(data.towerName, 0, 120))
+        && isValidId(data.wingId)
+        && (!('wingName' in data) || isValidString(data.wingName, 0, 120))
+        && isValidString(data.flatNumber, 1, 40)
+        && isValidString(data.floorNumber, 1, 20)
+        && isValidString(data.flatType, 1, 40)
+        && isValidString(data.ownerName, 1, 120)
+        && (!('ownerContact' in data) || isValidString(data.ownerContact, 0, 40))
+        && (!('ownerEmail' in data) || isValidString(data.ownerEmail, 0, 160))
+        && data.occupancyType in ['Owner Occupied', 'Tenant Occupied', 'Vacant']
+        && (!('tenantName' in data) || isValidString(data.tenantName, 0, 120))
+        && (!('tenantContact' in data) || isValidString(data.tenantContact, 0, 40))
+        && data.status in ['active', 'inactive']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidContactMessage(data, msgId) {
+      return data.keys().hasAll(['id', 'name', 'email', 'phone', 'subject', 'message', 'status', 'createdAt'])
+        && data.keys().hasOnly(['id', 'name', 'companyName', 'email', 'phone', 'subject', 'message', 'status', 'createdAt'])
+        && data.id == msgId
+        && isValidString(data.name, 2, 120)
+        && (!('companyName' in data) || isValidString(data.companyName, 0, 160))
+        && isValidString(data.email, 5, 160)
+        && data.email.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$')
+        && isValidString(data.phone, 5, 40)
+        && isValidString(data.subject, 2, 160)
+        && isValidString(data.message, 10, 2000)
+        && data.status in ['new', 'reviewed', 'archived']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data, logId) {
+      return data.keys().hasAll(['id', 'actorUid', 'actorEmail', 'actorRole', 'action', 'targetCollection', 'targetId', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['id', 'actorUid', 'actorEmail', 'actorRole', 'organizationId', 'action', 'targetCollection', 'targetId', 'targetUserId', 'summary', 'metadata', 'createdAt'])
+        && data.id == logId
+        && data.actorUid == request.auth.uid
+        && isValidString(data.actorEmail, 3, 160)
+        && isValidString(data.actorRole, 2, 60)
+        && (!('organizationId' in data) || isValidString(data.organizationId, 0, 128))
+        && isValidString(data.action, 2, 80)
+        && isValidString(data.targetCollection, 2, 80)
+        && isValidString(data.targetId, 1, 128)
+        && (!('targetUserId' in data) || isValidString(data.targetUserId, 0, 128))
+        && isValidString(data.summary, 2, 300)
+        && (!('metadata' in data) || data.metadata is map)
+        && data.createdAt == request.time;
+    }
+
+    // =========================================================================
+    // COLLECTION RULES
+    // =========================================================================
+
+    // 1. Unique Super Admin Singletons (systemConfig/main & systemConfig/superAdmin)
+    match /systemConfig/main {
+      allow get: if isVerifiedUser();
+      allow list: if false;
+      allow create: if isBootstrappedSuperAdmin()
+        && !mainConfigExists()
+        && isValidSystemConfigMain(incoming());
+      allow update, delete: if false;
+    }
+
+    match /systemConfig/superAdmin {
+      allow get: if isVerifiedUser();
+      allow list: if false;
+      allow create: if isBootstrappedSuperAdmin()
+        && !superAdminConfigExists()
+        && isValidSuperAdminSingleton(incoming());
+      allow update, delete: if false;
+    }
+
+    // 2. Trusted Users & Roles
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && request.auth.uid == userId;
+      allow get: if isValidId(userId) && (
+        isSuperAdmin() ||
+        hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.view') ||
+        (resource != null && userExists() && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId))
+      );
+
+      allow list: if isVerifiedUser() && (
+        (isBootstrappedSuperAdmin() && isSingletonSuperAdminUid()) ||
+        (userExists() && (
+          (getUserDoc().role == 'super_admin' && isSingletonSuperAdminUid()) ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_staff' in getUserDoc().permissions || 'platform.staff.view' in getUserDoc().permissions)) ||
+          (getUserDoc().role == 'organization_admin' && isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().email.lower() == authEmailLower()
+        && (
+          (isBootstrappedSuperAdmin() && isSingletonSuperAdminUid() && incoming().role == 'super_admin' && incoming().status == 'active') ||
+          (
+            exists(/databases/$(database)/documents/invitedAccounts/$(authEmailLower()))
+            && get(/databases/$(database)/documents/invitedAccounts/$(authEmailLower())).data.status == 'active'
+            && get(/databases/$(database)/documents/invitedAccounts/$(authEmailLower())).data.role == incoming().role
+            && get(/databases/$(database)/documents/invitedAccounts/$(authEmailLower())).data.permissions == incoming().permissions
+            && get(/databases/$(database)/documents/invitedAccounts/$(authEmailLower())).data.get('organizationId', '') == incoming().get('organizationId', '')
+          )
+        );
+
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isSuperAdmin() && existing().role != 'super_admin' && incoming().role != 'super_admin') ||
+          (existing().organizationId is string && isActiveOrgAdmin(existing().organizationId) && existing().role == 'organization_staff' && incoming().role == 'organization_staff' && incoming().organizationId == existing().organizationId) ||
+          (request.auth.uid == userId && isUserDocActive(existing()) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'fullName', 'phone', 'lastLoginAt', 'emailVerified', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(userId) && resource != null && isSuperAdmin() && existing().role != 'super_admin';
+    }
+
+    // 3. Invited Accounts
+    match /invitedAccounts/{emailKey} {
+      allow get: if isValidEmailKey(emailKey) && isVerifiedUser() && authEmailLower() == emailKey.lower();
+      allow get: if isValidEmailKey(emailKey) && (
+        isSuperAdmin() ||
+        hasSuperAdminStaffAnyPerm('manage_organizations', 'platform.organizations.create') ||
+        hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.create') ||
+        (resource != null && userExists() && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId))
+      );
+
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'organization_admin' && isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+
+      allow create: if isValidEmailKey(emailKey)
+        && isVerifiedUser()
+        && isValidInvitedAccount(incoming(), emailKey)
+        && incoming().invitedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          hasSuperAdminStaffAnyPerm('manage_organizations', 'platform.organizations.create') ||
+          hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.create') ||
+          (incoming().role == 'organization_staff' && incoming().organizationId is string && isActiveOrgAdmin(incoming().organizationId))
+        );
+
+      allow update: if isValidEmailKey(emailKey)
+        && isVerifiedUser()
+        && isValidInvitedAccount(incoming(), emailKey)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.edit') ||
+          (existing().role == 'organization_staff' && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId) && incoming().organizationId == existing().organizationId && incoming().role == 'organization_staff')
+        );
+
+      allow delete: if isValidEmailKey(emailKey) && resource != null && (
+        isSuperAdmin() ||
+        (existing().role == 'organization_staff' && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId))
+      );
+    }
+
+    // 4. Server-Only Login ID Directory (Client Reads Strictly Blocked)
+    match /loginDirectory/{loginKey} {
+      allow read: if false;
+      allow create: if isValidLoginIdKey(loginKey)
+        && isVerifiedUser()
+        && isValidLoginDirectoryEntry(incoming(), loginKey)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          hasSuperAdminStaffAnyPerm('manage_organizations', 'platform.organizations.create') ||
+          hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.create') ||
+          (incoming().role == 'organization_staff' && incoming().organizationId is string && isActiveOrgAdmin(incoming().organizationId))
+        );
+      allow update: if isValidLoginIdKey(loginKey)
+        && isVerifiedUser()
+        && isValidLoginDirectoryEntry(incoming(), loginKey)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          (existing().role == 'organization_staff' && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId) && incoming().organizationId == existing().organizationId && incoming().role == 'organization_staff')
+        );
+      allow delete: if isValidLoginIdKey(loginKey) && resource != null && (
+        isSuperAdmin() ||
+        (existing().role == 'organization_staff' && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId))
+      );
+    }
+
+    // 5. Organizations (Multi-Tenant Root)
+    match /organizations/{orgId} {
+      allow get: if isValidId(orgId) && (
+        isSuperAdmin() ||
+        hasSuperAdminStaffAnyPerm('manage_organizations', 'platform.organizations.view') ||
+        hasSuperAdminStaffAnyPerm('view_dashboard', 'platform.dashboard.view') ||
+        isOrgMember(orgId)
+      );
+
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('view_dashboard' in getUserDoc().permissions || 'manage_organizations' in getUserDoc().permissions || 'manage_reports' in getUserDoc().permissions || 'platform.dashboard.view' in getUserDoc().permissions || 'platform.organizations.view' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.id == getUserDoc().organizationId)
+        ))
+      );
+
+      allow create: if isValidId(orgId)
+        && isVerifiedUser()
+        && isValidOrganization(incoming(), orgId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('create_organizations', 'platform.organizations.create') || hasSuperAdminStaffPerm('manage_organizations'));
+
+      allow update: if isValidId(orgId)
+        && isVerifiedUser()
+        && isValidOrganization(incoming(), orgId)
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isSuperAdmin() ||
+          hasSuperAdminStaffAnyPerm('edit_organizations', 'platform.organizations.edit') ||
+          hasSuperAdminStaffPerm('manage_organizations') ||
+          (isActiveOrgAdmin(orgId) && isOrgOperational(orgId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contactPerson', 'email', 'phone', 'address', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(orgId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('delete_organizations', 'platform.organizations.delete'));
+    }
+
+    // 6. Super Admin Staff
+    match /superAdminStaff/{staffId} {
+      allow get: if isValidId(staffId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_staff', 'platform.staff.view'));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (getUserDoc().role == 'super_admin' || (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_staff' in getUserDoc().permissions || 'platform.staff.view' in getUserDoc().permissions))))
+      );
+      allow create: if isValidId(staffId)
+        && isVerifiedUser()
+        && isValidSuperAdminStaff(incoming(), staffId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isSuperAdmin();
+      allow update: if isValidId(staffId)
+        && isVerifiedUser()
+        && isValidSuperAdminStaff(incoming(), staffId)
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isSuperAdmin();
+      allow delete: if isValidId(staffId) && isSuperAdmin();
+    }
+
+    // 7. Organization Staff (Tenant-Isolated)
+    match /organizationStaff/{staffId} {
+      allow get: if isValidId(staffId) && (
+        isSuperAdmin() ||
+        hasSuperAdminStaffAnyPerm('manage_organizations', 'platform.organizations.view') ||
+        (resource != null && (
+          isActiveOrgAdmin(existing().organizationId) ||
+          hasOrgStaffAnyPerm(existing().organizationId, 'view_staff', 'organization.staff.view') ||
+          hasOrgStaffAnyPerm(existing().organizationId, 'manage_staff', 'organization.staff.edit')
+        ))
+      );
+
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_organizations' in getUserDoc().permissions || 'manage_reports' in getUserDoc().permissions || 'platform.organizations.view' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+
+      allow create: if isValidId(staffId)
+        && isVerifiedUser()
+        && isValidOrgStaff(incoming(), staffId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOrgOperational(incoming().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(incoming().organizationId) || hasOrgStaffAnyPerm(incoming().organizationId, 'manage_staff', 'organization.staff.create'));
+
+      allow update: if isValidId(staffId)
+        && isVerifiedUser()
+        && isValidOrgStaff(incoming(), staffId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isOrgOperational(existing().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(existing().organizationId) || hasOrgStaffAnyPerm(existing().organizationId, 'manage_staff', 'organization.staff.edit'));
+
+      allow delete: if isValidId(staffId) && (isSuperAdmin() || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+    }
+
+    // 8. Role Templates (Tenant-Isolated)
+    match /roles/{roleId} {
+      allow get: if isValidId(roleId) && (isSuperAdmin() || (resource != null && isOrgMember(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (getUserDoc().role == 'super_admin' || (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)))
+      );
+      allow create: if isValidId(roleId)
+        && isVerifiedUser()
+        && isValidRoleTemplate(incoming(), roleId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOrgOperational(incoming().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(incoming().organizationId));
+      allow update: if isValidId(roleId)
+        && isVerifiedUser()
+        && isValidRoleTemplate(incoming(), roleId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isOrgOperational(existing().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(existing().organizationId));
+      allow delete: if isValidId(roleId) && (isSuperAdmin() || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+    }
+
+    // 9. Subscription Plans (Super Admin Write; Active Plans Public Read)
+    match /subscriptionPlans/{planId} {
+      allow get: if isValidId(planId) && resource != null && existing().status == 'active';
+      allow get: if isValidId(planId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_plans', 'platform.subscriptions.view'));
+      allow list: if resource.data.status == 'active';
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_plans' in getUserDoc().permissions || 'platform.subscriptions.view' in getUserDoc().permissions))
+        ))
+      );
+      allow create: if isValidId(planId)
+        && isVerifiedUser()
+        && isValidSubscriptionPlan(incoming(), planId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_plans', 'platform.subscriptions.create'));
+      allow update: if isValidId(planId)
+        && isVerifiedUser()
+        && isValidSubscriptionPlan(incoming(), planId)
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_plans', 'platform.subscriptions.edit'));
+      allow delete: if isValidId(planId) && isSuperAdmin();
+    }
+
+    // 10. Subscriptions
+    match /subscriptions/{subId} {
+      allow get: if isValidId(subId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('view_payments', 'platform.subscriptions.view') || (resource != null && isOrgMember(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('view_payments' in getUserDoc().permissions || 'view_dashboard' in getUserDoc().permissions || 'platform.subscriptions.view' in getUserDoc().permissions || 'platform.dashboard.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(subId)
+        && isVerifiedUser()
+        && isValidSubscription(incoming(), subId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && orgExists(incoming().organizationId)
+        && isSuperAdmin();
+      allow update: if isValidId(subId)
+        && isVerifiedUser()
+        && isValidSubscription(incoming(), subId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isSuperAdmin();
+      allow delete: if isValidId(subId) && isSuperAdmin();
+    }
+
+    // 11. Payment Verification Records
+    match /payments/{paymentId} {
+      allow get: if isValidId(paymentId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('view_payments', 'platform.subscriptions.view') || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('view_payments' in getUserDoc().permissions || 'platform.subscriptions.view' in getUserDoc().permissions)) ||
+          (getUserDoc().role == 'organization_admin' && isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(paymentId)
+        && isVerifiedUser()
+        && isValidPaymentRecord(incoming(), paymentId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && orgExists(incoming().organizationId)
+        && (
+          isSuperAdmin() ||
+          (isActiveOrgAdmin(incoming().organizationId) && incoming().verificationStatus == 'Pending Verification')
+        );
+      allow update: if isValidId(paymentId)
+        && isVerifiedUser()
+        && isValidPaymentRecord(incoming(), paymentId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isSuperAdmin();
+      allow delete: if isValidId(paymentId) && isSuperAdmin();
+    }
+
+    // 12. Towers (Tenant-Isolated)
+    match /towers/{towerId} {
+      allow get: if isValidId(towerId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_reports', 'platform.reports.view') || (resource != null && isOrgMember(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_reports' in getUserDoc().permissions || 'manage_organizations' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions || 'platform.organizations.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(towerId)
+        && isVerifiedUser()
+        && isValidTower(incoming(), towerId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOrgOperational(incoming().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(incoming().organizationId) || hasOrgStaffAnyPerm(incoming().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow update: if isValidId(towerId)
+        && isVerifiedUser()
+        && isValidTower(incoming(), towerId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isOrgOperational(existing().organizationId)
+        && (isSuperAdmin() || isActiveOrgAdmin(existing().organizationId) || hasOrgStaffAnyPerm(existing().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow delete: if isValidId(towerId) && (isSuperAdmin() || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+    }
+
+    // 13. Wings (Tenant-Isolated & Cross-Tenant Tower Verification)
+    match /wings/{wingId} {
+      allow get: if isValidId(wingId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_reports', 'platform.reports.view') || (resource != null && isOrgMember(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_reports' in getUserDoc().permissions || 'manage_organizations' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions || 'platform.organizations.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(wingId)
+        && isVerifiedUser()
+        && isValidWing(incoming(), wingId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOrgOperational(incoming().organizationId)
+        && exists(/databases/$(database)/documents/towers/$(incoming().towerId))
+        && get(/databases/$(database)/documents/towers/$(incoming().towerId)).data.organizationId == incoming().organizationId
+        && (isSuperAdmin() || isActiveOrgAdmin(incoming().organizationId) || hasOrgStaffAnyPerm(incoming().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow update: if isValidId(wingId)
+        && isVerifiedUser()
+        && isValidWing(incoming(), wingId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isOrgOperational(existing().organizationId)
+        && exists(/databases/$(database)/documents/towers/$(incoming().towerId))
+        && get(/databases/$(database)/documents/towers/$(incoming().towerId)).data.organizationId == incoming().organizationId
+        && (isSuperAdmin() || isActiveOrgAdmin(existing().organizationId) || hasOrgStaffAnyPerm(existing().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow delete: if isValidId(wingId) && (isSuperAdmin() || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+    }
+
+    // 14. Flats (Tenant-Isolated & Cross-Tenant Tower+Wing Verification)
+    match /flats/{flatId} {
+      allow get: if isValidId(flatId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_reports', 'platform.reports.view') || (resource != null && isOrgMember(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_reports' in getUserDoc().permissions || 'manage_organizations' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions || 'platform.organizations.view' in getUserDoc().permissions)) ||
+          (isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(flatId)
+        && isVerifiedUser()
+        && isValidFlat(incoming(), flatId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isOrgOperational(incoming().organizationId)
+        && exists(/databases/$(database)/documents/towers/$(incoming().towerId))
+        && get(/databases/$(database)/documents/towers/$(incoming().towerId)).data.organizationId == incoming().organizationId
+        && exists(/databases/$(database)/documents/wings/$(incoming().wingId))
+        && get(/databases/$(database)/documents/wings/$(incoming().wingId)).data.organizationId == incoming().organizationId
+        && (isSuperAdmin() || isActiveOrgAdmin(incoming().organizationId) || hasOrgStaffAnyPerm(incoming().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow update: if isValidId(flatId)
+        && isVerifiedUser()
+        && isValidFlat(incoming(), flatId)
+        && incoming().organizationId == existing().organizationId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && isOrgOperational(existing().organizationId)
+        && exists(/databases/$(database)/documents/towers/$(incoming().towerId))
+        && get(/databases/$(database)/documents/towers/$(incoming().towerId)).data.organizationId == incoming().organizationId
+        && exists(/databases/$(database)/documents/wings/$(incoming().wingId))
+        && get(/databases/$(database)/documents/wings/$(incoming().wingId)).data.organizationId == incoming().organizationId
+        && (isSuperAdmin() || isActiveOrgAdmin(existing().organizationId) || hasOrgStaffAnyPerm(existing().organizationId, 'manage_properties', 'organization.properties.manage'));
+      allow delete: if isValidId(flatId) && (isSuperAdmin() || (resource != null && isActiveOrgAdmin(existing().organizationId)));
+    }
+
+    // 15. Contact Messages (Public Create, Privileged Read/Update)
+    match /contactMessages/{messageId} {
+      allow get: if isValidId(messageId) && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_reports', 'platform.reports.view') || hasSuperAdminStaffAnyPerm('view_dashboard', 'platform.dashboard.view'));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'super_admin_staff' && isUserDocActive(getUserDoc()) && ('manage_reports' in getUserDoc().permissions || 'view_dashboard' in getUserDoc().permissions || 'platform.reports.view' in getUserDoc().permissions || 'platform.dashboard.view' in getUserDoc().permissions))
+        ))
+      );
+      allow create: if isValidId(messageId)
+        && isValidContactMessage(incoming(), messageId)
+        && incoming().status == 'new'
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(messageId)
+        && isVerifiedUser()
+        && isValidContactMessage(incoming(), messageId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status'])
+        && (isSuperAdmin() || hasSuperAdminStaffAnyPerm('manage_reports', 'platform.reports.view'));
+      allow delete: if isValidId(messageId) && isSuperAdmin();
+    }
+
+    // 16. Audit Logs (Append-Only)
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && (isSuperAdmin() || (resource != null && existing().organizationId is string && isActiveOrgAdmin(existing().organizationId)));
+      allow list: if isVerifiedUser() && (
+        isBootstrappedSuperAdmin() ||
+        (userExists() && (
+          getUserDoc().role == 'super_admin' ||
+          (getUserDoc().role == 'organization_admin' && isUserDocActive(getUserDoc()) && resource.data.organizationId == getUserDoc().organizationId)
+        ))
+      );
+      allow create: if isValidId(logId)
+        && isVerifiedUser()
+        && isValidAuditLog(incoming(), logId);
+      allow update, delete: if false;
+    }
+  }
+}

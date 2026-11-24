@@ -1,0 +1,420 @@
+{
+  "entities": {
+    "SystemConfigMain": {
+      "title": "SystemConfigMain",
+      "description": "Primary platform governance singleton at systemConfig/main enforcing single Super Admin initialization.",
+      "type": "object",
+      "properties": {
+        "superAdminUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "initialized": { "type": "boolean" },
+        "platformName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["superAdminUid", "initialized", "platformName", "createdAt", "updatedAt"]
+    },
+    "SystemSuperAdmin": {
+      "title": "SystemSuperAdmin",
+      "description": "Legacy singleton document enforcing exactly one Super Admin across the platform.",
+      "type": "object",
+      "properties": {
+        "superAdminUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["superAdminUid", "email", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Trusted role, status, and tenant assignment document keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "loginId": { "type": "string", "maxLength": 80 },
+        "role": { "type": "string", "enum": ["super_admin", "super_admin_staff", "organization_admin", "organization_staff"] },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "organizationName": { "type": "string", "maxLength": 160 },
+        "employeeId": { "type": "string", "maxLength": 60 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "department": { "type": "string", "maxLength": 100 },
+        "permissions": { "type": "array" },
+        "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "accountStatus": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "emailVerified": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "status", "permissions", "createdAt", "updatedAt"]
+    },
+    "InvitedAccount": {
+      "title": "InvitedAccount",
+      "description": "Admin-provisioned account invitation keyed by lowercase email for secure login binding without overwriting admin sessions.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "loginId": { "type": "string", "maxLength": 80 },
+        "role": { "type": "string", "enum": ["super_admin_staff", "organization_admin", "organization_staff"] },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "organizationName": { "type": "string", "maxLength": 160 },
+        "employeeId": { "type": "string", "maxLength": 60 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "department": { "type": "string", "maxLength": 100 },
+        "permissions": { "type": "array" },
+        "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "invitedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "permissions", "status", "invitedBy", "createdAt", "updatedAt"]
+    },
+    "LoginDirectoryEntry": {
+      "title": "LoginDirectoryEntry",
+      "description": "Server-only Login ID lookup map (never readable by clients directly; accessed only via resolveLoginId Cloud Function).",
+      "type": "object",
+      "properties": {
+        "loginId": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["super_admin", "super_admin_staff", "organization_admin", "organization_staff"] },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "accountStatus": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["loginId", "email", "role", "accountStatus", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Tenant organization record managed by Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "type": { "type": "string", "enum": ["Company", "Factory", "Society", "Apartment", "Industry", "Commercial Building", "Other"] },
+        "contactPerson": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 5, "maxLength": 40 },
+        "address": { "type": "string", "minLength": 3, "maxLength": 300 },
+        "adminLoginEmail": { "type": "string", "format": "email", "maxLength": 160 },
+        "adminLoginId": { "type": "string", "maxLength": 80 },
+        "adminUid": { "type": "string", "maxLength": 128 },
+        "subscriptionPlanId": { "type": "string", "maxLength": 128 },
+        "subscriptionPlanName": { "type": "string", "maxLength": 120 },
+        "subscriptionStatus": { "type": "string", "enum": ["Pending", "Active", "Expired", "Suspended", "Cancelled"] },
+        "subscriptionStartDate": { "type": "string", "maxLength": 40 },
+        "subscriptionExpiryDate": { "type": "string", "maxLength": 40 },
+        "accountStatus": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "type", "contactPerson", "email", "phone", "address", "adminLoginEmail", "subscriptionStatus", "accountStatus", "createdBy", "createdAt", "updatedAt"]
+    },
+    "SuperAdminStaff": {
+      "title": "SuperAdminStaff",
+      "description": "Global platform staff managed by Super Admin with granular permissions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "loginId": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "assignedRole": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "permissions": { "type": "array" },
+        "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "email", "designation", "department", "assignedRole", "permissions", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "OrganizationStaff": {
+      "title": "OrganizationStaff",
+      "description": "Tenant-isolated staff member belonging to a single organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "loginId": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "permissions": { "type": "array" },
+        "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "employeeId", "name", "email", "designation", "department", "role", "permissions", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "RoleTemplate": {
+      "title": "RoleTemplate",
+      "description": "Reusable role and permission bundle scoped to an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 240 },
+        "permissions": { "type": "array" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "name", "permissions", "createdBy", "createdAt", "updatedAt"]
+    },
+    "SubscriptionPlan": {
+      "title": "SubscriptionPlan",
+      "description": "Subscription tier managed solely by Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "description": { "type": "string", "minLength": 4, "maxLength": 300 },
+        "targetAudience": { "type": "string", "maxLength": 120 },
+        "monthlyPrice": { "type": "number" },
+        "quarterlyPrice": { "type": "number" },
+        "halfYearlyPrice": { "type": "number" },
+        "yearlyPrice": { "type": "number" },
+        "features": { "type": "array" },
+        "maxStaff": { "type": "number" },
+        "maxSites": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "description", "monthlyPrice", "quarterlyPrice", "halfYearlyPrice", "yearlyPrice", "features", "maxStaff", "maxSites", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "Organization subscription allocation controlled by Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "maxLength": 160 },
+        "planId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "planName": { "type": "string", "maxLength": 100 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "quarterly", "half_yearly", "yearly"] },
+        "status": { "type": "string", "enum": ["Pending", "Active", "Expired", "Suspended", "Cancelled"] },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "expiryDate": { "type": "string", "maxLength": 40 },
+        "verifiedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "planId", "planName", "billingCycle", "status", "startDate", "expiryDate", "createdAt", "updatedAt"]
+    },
+    "PaymentRecord": {
+      "title": "PaymentRecord",
+      "description": "Verified payment record for subscription activation auditability.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "maxLength": 160 },
+        "planId": { "type": "string", "maxLength": 128 },
+        "planName": { "type": "string", "maxLength": 100 },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 10 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "quarterly", "half_yearly", "yearly"] },
+        "referenceCode": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "verificationStatus": { "type": "string", "enum": ["Pending Verification", "Verified", "Rejected"] },
+        "verifiedBy": { "type": "string", "maxLength": 128 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "organizationName", "planId", "planName", "amount", "currency", "billingCycle", "referenceCode", "verificationStatus", "createdAt", "updatedAt"]
+    },
+    "Tower": {
+      "title": "Tower",
+      "description": "Residential or commercial building tower belonging to an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "towerNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "name", "towerNumber", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Wing": {
+      "title": "Wing",
+      "description": "Wing assigned to a tower within an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "towerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "towerName": { "type": "string", "maxLength": 120 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "towerId", "name", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Flat": {
+      "title": "Flat",
+      "description": "Flat or unit inside a wing and tower within an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "towerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "towerName": { "type": "string", "maxLength": 120 },
+        "wingId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "wingName": { "type": "string", "maxLength": 120 },
+        "flatNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "floorNumber": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "flatType": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "ownerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerContact": { "type": "string", "maxLength": 40 },
+        "ownerEmail": { "type": "string", "maxLength": 160 },
+        "occupancyType": { "type": "string", "enum": ["Owner Occupied", "Tenant Occupied", "Vacant"] },
+        "tenantName": { "type": "string", "maxLength": 120 },
+        "tenantContact": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "towerId", "wingId", "flatNumber", "floorNumber", "flatType", "ownerName", "occupancyType", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "ContactMessage": {
+      "title": "ContactMessage",
+      "description": "Public website inquiry submission.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "companyName": { "type": "string", "maxLength": 160 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 5, "maxLength": 40 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 10, "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["new", "reviewed", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "email", "phone", "subject", "message", "status", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Append-only administrative audit log.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 160 },
+        "actorRole": { "type": "string", "maxLength": 60 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "targetCollection": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "summary": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "metadata": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "actorEmail", "actorRole", "action", "targetCollection", "targetId", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/systemConfig/main": {
+      "schema": { "$ref": "#/entities/SystemConfigMain" },
+      "description": "Primary governance singleton enforcing single Super Admin initialization."
+    },
+    "/systemConfig/superAdmin": {
+      "schema": { "$ref": "#/entities/SystemSuperAdmin" },
+      "description": "Unique Super Admin singleton document."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Trusted user role, accountStatus, and tenant assignments."
+    },
+    "/invitedAccounts/{emailKey}": {
+      "schema": { "$ref": "#/entities/InvitedAccount" },
+      "description": "Pre-authorized user invitations created by Super Admin or Org Admin."
+    },
+    "/loginDirectory/{loginId}": {
+      "schema": { "$ref": "#/entities/LoginDirectoryEntry" },
+      "description": "Server-only Login ID to email lookup directory (blocked from public client reads)."
+    },
+    "/organizations/{orgId}": {
+      "schema": { "$ref": "#/entities/Organization" },
+      "description": "Tenant organization records."
+    },
+    "/superAdminStaff/{staffId}": {
+      "schema": { "$ref": "#/entities/SuperAdminStaff" },
+      "description": "Super Admin Staff records."
+    },
+    "/organizationStaff/{staffId}": {
+      "schema": { "$ref": "#/entities/OrganizationStaff" },
+      "description": "Organization-scoped staff records."
+    },
+    "/roles/{roleId}": {
+      "schema": { "$ref": "#/entities/RoleTemplate" },
+      "description": "Organization-scoped reusable role templates."
+    },
+    "/subscriptionPlans/{planId}": {
+      "schema": { "$ref": "#/entities/SubscriptionPlan" },
+      "description": "Platform subscription tiers managed solely by Super Admin."
+    },
+    "/subscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/Subscription" },
+      "description": "Organization subscription allocations."
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/PaymentRecord" },
+      "description": "Verified subscription payment records."
+    },
+    "/towers/{towerId}": {
+      "schema": { "$ref": "#/entities/Tower" },
+      "description": "Organization-scoped property towers."
+    },
+    "/wings/{wingId}": {
+      "schema": { "$ref": "#/entities/Wing" },
+      "description": "Organization-scoped wings linked to towers."
+    },
+    "/flats/{flatId}": {
+      "schema": { "$ref": "#/entities/Flat" },
+      "description": "Organization-scoped flats linked to wings and towers."
+    },
+    "/contactMessages/{messageId}": {
+      "schema": { "$ref": "#/entities/ContactMessage" },
+      "description": "Public inquiry submissions."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Append-only administrative audit logs."
+    }
+  }
+}

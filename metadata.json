@@ -1,0 +1,8 @@
+{
+  "name": "REXON MANAGEMENT APP",
+  "description": "Smart Security & Facility Management Platform for agencies, residential societies, factories, and corporate campuses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
