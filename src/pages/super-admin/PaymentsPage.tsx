@@ -12,6 +12,7 @@ import {
   createPaymentRecord,
   listAllSubscriptionPlans,
   listPayments,
+  listPublicSubscriptionPlans,
   verifyPaymentAndActivateSubscription,
 } from '../../services/subscriptions/subscriptionService';
 import { exportTableToPdf } from '../../services/reports/pdfService';
@@ -19,7 +20,7 @@ import { BillingCycle, Organization, PaymentRecord, SubscriptionPlan } from '../
 import { DEMO_PAYMENTS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
 
 export function PaymentsPage() {
-  const { userProfile } = useAuth();
+  const { userProfile, hasPermission } = useAuth();
   const { showToast } = useToast();
 
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
@@ -45,10 +46,19 @@ export function PaymentsPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
+      const canListOrgs =
+        isSuperAdmin ||
+        hasPermission('manage_organizations') ||
+        hasPermission('view_dashboard') ||
+        hasPermission('manage_reports');
+      const canListAllPlans =
+        isSuperAdmin || hasPermission('manage_plans') || hasPermission('view_payments');
       const [payData, orgData, planData] = await Promise.all([
         listPayments(),
-        listOrganizations().catch(() => []),
-        listAllSubscriptionPlans().catch(() => []),
+        canListOrgs ? listOrganizations().catch(() => []) : Promise.resolve([]),
+        (canListAllPlans ? listAllSubscriptionPlans() : listPublicSubscriptionPlans()).catch(
+          () => []
+        ),
       ]);
       setPayments(payData);
       setOrgs(orgData);
@@ -58,7 +68,7 @@ export function PaymentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, isSuperAdmin, hasPermission]);
 
   useEffect(() => {
     void loadData();

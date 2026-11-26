@@ -33,7 +33,6 @@ import { SuperAdminStaffDashboard } from './pages/super-admin-staff/SuperAdminSt
 import { OrgAdminDashboard } from './pages/organization-admin/OrgAdminDashboard';
 import { OrgProfilePage } from './pages/organization-admin/OrgProfilePage';
 import { OrgStaffPage } from './pages/organization-admin/OrgStaffPage';
-import { OrgRolesPage } from './pages/organization-admin/OrgRolesPage';
 import { PropertyOverviewPage } from './pages/organization-admin/PropertyOverviewPage';
 import { TowersPage } from './pages/organization-admin/TowersPage';
 import { WingsPage } from './pages/organization-admin/WingsPage';
@@ -236,11 +235,7 @@ export default function App() {
               />
               <Route
                 path="/organization-admin/roles"
-                element={
-                  <ProtectedRoute allowedRoles={['organization_admin']}>
-                    <OrgRolesPage />
-                  </ProtectedRoute>
-                }
+                element={<Navigate to="/organization-admin/staff?tab=roles" replace />}
               />
               <Route
                 path="/organization-admin/properties"

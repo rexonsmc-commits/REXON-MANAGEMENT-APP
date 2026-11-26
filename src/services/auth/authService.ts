@@ -1,7 +1,11 @@
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
   browserLocalPersistence,
   browserSessionPersistence,
+  createUserWithEmailAndPassword,
+  getAuth,
   GoogleAuthProvider,
+  inMemoryPersistence,
   sendEmailVerification,
   sendPasswordResetEmail,
   setPersistence,
@@ -12,9 +16,12 @@ import {
   User,
 } from 'firebase/auth';
 import { doc, getDoc, getDocFromServer, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
-import { BOOTSTRAPPED_SUPER_ADMIN_EMAIL } from '../../config/permissions';
+import {
+  BOOTSTRAPPED_SUPER_ADMIN_EMAIL,
+  BOOTSTRAPPED_SUPER_ADMIN_UID,
+} from '../../config/permissions';
 import { InvitedAccount, SystemConfigMain, UserProfile } from '../../types';
-import { auth, db, handleFirestoreError, OperationType } from '../firebase/config';
+import { auth, db, firebaseConfig, handleFirestoreError, OperationType } from '../firebase/config';
 import {
   callInitializeSuperAdmin,
   callResolveLoginId,
@@ -80,6 +87,138 @@ export async function sendVerificationEmailToCurrentUser(): Promise<void> {
     throw new Error('No signed-in user session found.');
   }
   await sendEmailVerification(auth.currentUser);
+}
+
+export interface ProvisionedAuthResult {
+  status: 'created' | 'already_exists' | 'error';
+  uid?: string;
+  verificationSent?: boolean;
+  message: string;
+}
+
+/**
+ * Provisions an email/password account directly inside Firebase Authentication
+ * using an isolated secondary FirebaseApp with in-memory persistence so the
+ * active Super Admin or Organization Admin session is never disrupted.
+ */
+export async function provisionFirebaseAuthCredentials(params: {
+  email: string;
+  password: string;
+  displayName?: string;
+}): Promise<ProvisionedAuthResult> {
+  const emailLower = params.email.trim().toLowerCase();
+  const password = params.password;
+
+  if (!emailLower || !emailLower.includes('@')) {
+    return { status: 'error', message: 'A valid login email address is required.' };
+  }
+  if (!password || password.length < 6) {
+    return { status: 'error', message: 'Password must be at least 6 characters long.' };
+  }
+
+  const SECONDARY_APP_NAME = 'rexon-auth-provisioner';
+  const existingApp = getApps().find((a) => a.name === SECONDARY_APP_NAME);
+  const secondaryApp = existingApp || initializeApp(firebaseConfig, SECONDARY_APP_NAME);
+  const secondaryAuth = getAuth(secondaryApp);
+
+  try {
+    await setPersistence(secondaryAuth, inMemoryPersistence);
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, emailLower, password);
+    if (params.displayName?.trim()) {
+      await updateProfile(cred.user, {
+        displayName: params.displayName.trim().slice(0, 120),
+      }).catch(() => undefined);
+    }
+    let verificationSent = false;
+    try {
+      await sendEmailVerification(cred.user);
+      verificationSent = true;
+    } catch {
+      verificationSent = false;
+    }
+    return {
+      status: 'created',
+      uid: cred.user.uid,
+      verificationSent,
+      message: verificationSent
+        ? `Firebase Authentication account created for ${emailLower} and verification email dispatched.`
+        : `Firebase Authentication account created for ${emailLower}. User can verify email upon sign-in.`,
+    };
+  } catch (err: unknown) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (code === 'auth/email-already-in-use') {
+      return {
+        status: 'already_exists',
+        message: `A Firebase Authentication account already exists for ${emailLower}. Use "Send Password Reset" if they need a new password.`,
+      };
+    }
+    return {
+      status: 'error',
+      message:
+        err instanceof Error
+          ? err.message
+          : 'Unable to create Firebase Authentication credentials.',
+    };
+  } finally {
+    await signOut(secondaryAuth).catch(() => undefined);
+  }
+}
+
+/**
+ * Links the newly created Firebase Auth UID to the invitedAccounts record and
+ * pre-creates /users/{uid} in Firestore so the provisioned user can sign in immediately.
+ */
+export async function syncProvisionedAccountProfile(params: {
+  uid: string;
+  email: string;
+}): Promise<void> {
+  const emailLower = params.email.trim().toLowerCase();
+  if (!params.uid || !emailLower) return;
+
+  try {
+    const inviteRef = doc(db, 'invitedAccounts', emailLower);
+    const inviteSnap = await getDoc(inviteRef);
+    if (!inviteSnap.exists()) return;
+
+    const invite = inviteSnap.data() as InvitedAccount;
+    await updateDoc(inviteRef, {
+      uid: params.uid,
+      updatedAt: serverTimestamp(),
+    }).catch(() => undefined);
+
+    const userRef = doc(db, 'users', params.uid);
+    const existingUser = await getDoc(userRef).catch(() => null);
+    if (existingUser && existingUser.exists()) return;
+
+    const cleanName = (invite.displayName || 'Workspace User').slice(0, 120);
+    const userPayload: Record<string, unknown> = {
+      uid: params.uid,
+      email: emailLower,
+      displayName: cleanName,
+      fullName: cleanName,
+      role: invite.role,
+      permissions: invite.permissions || [],
+      status: invite.status || 'active',
+      accountStatus: invite.status || 'active',
+      emailVerified: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    if (invite.phone) userPayload.phone = invite.phone;
+    if (invite.loginId) userPayload.loginId = invite.loginId;
+    if (invite.employeeId) userPayload.employeeId = invite.employeeId;
+    if (invite.organizationId) userPayload.organizationId = invite.organizationId;
+    if (invite.organizationName) userPayload.organizationName = invite.organizationName;
+    if (invite.designation) userPayload.designation = invite.designation;
+    if (invite.department) userPayload.department = invite.department;
+
+    await setDoc(userRef, userPayload).catch(() => undefined);
+  } catch {
+    // Non-blocking: user can still claim invitedAccounts/{emailLower} on first login
+  }
 }
 
 export async function recordAuthLifecycleAudit(
@@ -182,7 +321,101 @@ export async function getSystemConfigMain(): Promise<SystemConfigMain | null> {
   }
 }
 
+async function ensureSuperAdminSingletons(uid: string, emailLower: string): Promise<boolean> {
+  let mainSnap;
+  try {
+    mainSnap = await getDoc(doc(db, 'systemConfig', 'main'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'systemConfig/main');
+  }
+
+  let legacySnap;
+  try {
+    legacySnap = await getDoc(doc(db, 'systemConfig', 'superAdmin'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'systemConfig/superAdmin');
+  }
+
+  if (mainSnap.exists() && mainSnap.data()?.superAdminUid !== uid) {
+    if (uid === BOOTSTRAPPED_SUPER_ADMIN_UID) {
+      try {
+        await updateDoc(doc(db, 'systemConfig', 'main'), {
+          superAdminUid: uid,
+          email: emailLower,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, 'systemConfig/main');
+      }
+    } else {
+      return false;
+    }
+  }
+  if (legacySnap.exists() && legacySnap.data()?.superAdminUid !== uid) {
+    if (uid === BOOTSTRAPPED_SUPER_ADMIN_UID) {
+      try {
+        await updateDoc(doc(db, 'systemConfig', 'superAdmin'), {
+          superAdminUid: uid,
+          email: emailLower,
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, 'systemConfig/superAdmin');
+      }
+    } else {
+      return false;
+    }
+  }
+
+  if (!mainSnap.exists()) {
+    try {
+      await setDoc(doc(db, 'systemConfig', 'main'), {
+        superAdminUid: uid,
+        email: emailLower,
+        initialized: true,
+        platformName: 'REXON MANAGEMENT APP',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'systemConfig/main');
+    }
+  }
+
+  if (!legacySnap.exists()) {
+    try {
+      await setDoc(doc(db, 'systemConfig', 'superAdmin'), {
+        superAdminUid: uid,
+        email: emailLower,
+        createdAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'systemConfig/superAdmin');
+    }
+  }
+
+  return true;
+}
+
+const inFlightProfileResolutions = new Map<string, Promise<UserProfile | null>>();
+
 export async function resolveTrustedUserProfile(
+  firebaseUser: User,
+  forceServerRefresh = false
+): Promise<UserProfile | null> {
+  const key = firebaseUser.uid;
+  const existingPromise = inFlightProfileResolutions.get(key);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const run = resolveTrustedUserProfileInternal(firebaseUser, forceServerRefresh).finally(() => {
+    inFlightProfileResolutions.delete(key);
+  });
+  inFlightProfileResolutions.set(key, run);
+  return run;
+}
+
+async function resolveTrustedUserProfileInternal(
   firebaseUser: User,
   forceServerRefresh = false
 ): Promise<UserProfile | null> {
@@ -190,158 +423,163 @@ export async function resolveTrustedUserProfile(
   const userPath = `users/${uid}`;
   const emailLower = firebaseUser.email?.toLowerCase().trim() || '';
 
-  // Firestore security rules require a verified email token (`email_verified == true`)
-  // for workspace reads/writes and initial provisioning.
-  if (!emailLower || !firebaseUser.emailVerified) {
+  if (!emailLower) {
     return null;
   }
 
+  // Super Admin bootstrap & access strictly require verified email status.
+  if (emailLower === BOOTSTRAPPED_SUPER_ADMIN_EMAIL && !firebaseUser.emailVerified) {
+    return null;
+  }
+
+  let userSnap;
+  const userRef = doc(db, 'users', uid);
   try {
-    const userRef = doc(db, 'users', uid);
-    const userSnap = forceServerRefresh
+    userSnap = forceServerRefresh
       ? await getDocFromServer(userRef).catch(() => getDoc(userRef))
       : await getDoc(userRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, userPath);
+  }
 
-    if (userSnap.exists()) {
-      const existingProfile = userSnap.data() as UserProfile;
-      const effectiveStatus = existingProfile.accountStatus || existingProfile.status;
-      if (effectiveStatus === 'active' && firebaseUser.emailVerified) {
-        updateDoc(userRef, {
-          lastLoginAt: serverTimestamp(),
-          emailVerified: firebaseUser.emailVerified,
-          updatedAt: serverTimestamp(),
-        }).catch(() => undefined);
-      }
-      return {
-        ...existingProfile,
-        status: effectiveStatus,
-        accountStatus: effectiveStatus,
-      };
+  if (userSnap.exists()) {
+    const existingProfile = userSnap.data() as UserProfile;
+    const effectiveStatus = existingProfile.accountStatus || existingProfile.status;
+    if (
+      emailLower === BOOTSTRAPPED_SUPER_ADMIN_EMAIL &&
+      uid === BOOTSTRAPPED_SUPER_ADMIN_UID
+    ) {
+      await ensureSuperAdminSingletons(uid, emailLower).catch(() => undefined);
     }
+    if (effectiveStatus === 'active') {
+      updateDoc(userRef, {
+        lastLoginAt: serverTimestamp(),
+        emailVerified: Boolean(firebaseUser.emailVerified),
+        updatedAt: serverTimestamp(),
+      }).catch(() => undefined);
+    }
+    return {
+      ...existingProfile,
+      status: effectiveStatus,
+      accountStatus: effectiveStatus,
+    };
+  }
 
-    // 1. Unique Super Admin bootstrap check (Single Master Account invariant)
-    if (emailLower === BOOTSTRAPPED_SUPER_ADMIN_EMAIL) {
-      if (isCloudFunctionsEnabled()) {
-        try {
-          await callInitializeSuperAdmin({
-            fullName: firebaseUser.displayName || 'Super Administrator',
-          });
-          const initializedSnap = await getDocFromServer(userRef).catch(() => getDoc(userRef));
-          if (initializedSnap.exists()) {
-            return initializedSnap.data() as UserProfile;
-          }
-        } catch (fnErr) {
-          if (!isCallableNotDeployedError(fnErr)) {
+  // 1. Unique Super Admin bootstrap check (Single Master Account invariant)
+  if (emailLower === BOOTSTRAPPED_SUPER_ADMIN_EMAIL) {
+    if (isCloudFunctionsEnabled()) {
+      try {
+        await callInitializeSuperAdmin({
+          fullName: firebaseUser.displayName || 'Super Administrator',
+        });
+        const initializedSnap = await getDocFromServer(userRef).catch(() => getDoc(userRef));
+        if (initializedSnap.exists()) {
+          return initializedSnap.data() as UserProfile;
+        }
+      } catch (fnErr) {
+        if (!isCallableNotDeployedError(fnErr)) {
+          try {
             const existingAfter = await getDoc(userRef);
             if (existingAfter.exists()) {
               return existingAfter.data() as UserProfile;
             }
+          } catch (error) {
+            handleFirestoreError(error, OperationType.GET, userPath);
           }
         }
       }
-
-      const mainSnap = await getDoc(doc(db, 'systemConfig', 'main'));
-      const legacySnap = await getDoc(doc(db, 'systemConfig', 'superAdmin'));
-
-      if (mainSnap.exists() && mainSnap.data()?.superAdminUid !== uid) {
-        return null;
-      }
-      if (legacySnap.exists() && legacySnap.data()?.superAdminUid !== uid) {
-        return null;
-      }
-
-      if (!mainSnap.exists()) {
-        await setDoc(doc(db, 'systemConfig', 'main'), {
-          superAdminUid: uid,
-          email: emailLower,
-          initialized: true,
-          platformName: 'REXON MANAGEMENT APP',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      if (!legacySnap.exists()) {
-        await setDoc(doc(db, 'systemConfig', 'superAdmin'), {
-          superAdminUid: uid,
-          email: emailLower,
-          createdAt: serverTimestamp(),
-        });
-      }
-
-      const cleanName = (firebaseUser.displayName || 'Super Administrator').slice(0, 120);
-      const profilePayload: Record<string, unknown> = {
-        uid,
-        email: emailLower,
-        displayName: cleanName,
-        fullName: cleanName,
-        role: 'super_admin',
-        designation: 'Platform Super Administrator',
-        department: 'Global Governance',
-        permissions: ['all'],
-        status: 'active',
-        accountStatus: 'active',
-        emailVerified: true,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastLoginAt: serverTimestamp(),
-      };
-
-      await setDoc(userRef, profilePayload);
-      const createdSnap = await getDoc(userRef);
-      return createdSnap.exists() ? (createdSnap.data() as UserProfile) : null;
     }
 
-    // 2. Check pre-authorized invitation record created by Super Admin or Org Admin
-    const inviteRef = doc(db, 'invitedAccounts', emailLower);
-    const inviteSnap = await getDoc(inviteRef);
-    if (!inviteSnap.exists()) {
+    const singletonOk = await ensureSuperAdminSingletons(uid, emailLower);
+    if (!singletonOk) {
       return null;
     }
 
-    const invite = inviteSnap.data() as InvitedAccount;
-    if (invite.status !== 'active') {
-      return {
-        uid,
-        email: emailLower,
-        displayName: invite.displayName || 'User',
-        role: invite.role,
-        organizationId: invite.organizationId,
-        organizationName: invite.organizationName,
-        permissions: invite.permissions || [],
-        status: invite.status,
-        accountStatus: invite.status,
-      };
-    }
-
-    const displayName = (firebaseUser.displayName || invite.displayName || 'Staff User').slice(0, 120);
-    const invitedProfilePayload: Record<string, unknown> = {
+    const cleanName = (firebaseUser.displayName || 'Super Administrator').slice(0, 120);
+    const profilePayload: Record<string, unknown> = {
       uid,
       email: emailLower,
-      displayName,
-      fullName: displayName,
-      role: invite.role,
-      permissions: invite.permissions || [],
-      status: invite.status,
-      accountStatus: invite.status,
+      displayName: cleanName,
+      fullName: cleanName,
+      role: 'super_admin',
+      designation: 'Platform Super Administrator',
+      department: 'Global Governance',
+      permissions: ['all'],
+      status: 'active',
+      accountStatus: 'active',
       emailVerified: true,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       lastLoginAt: serverTimestamp(),
     };
 
-    if (invite.phone) invitedProfilePayload.phone = invite.phone;
-    if (invite.loginId) invitedProfilePayload.loginId = invite.loginId;
-    if (invite.employeeId) invitedProfilePayload.employeeId = invite.employeeId;
-    if (invite.organizationId) invitedProfilePayload.organizationId = invite.organizationId;
-    if (invite.organizationName) invitedProfilePayload.organizationName = invite.organizationName;
-    if (invite.designation) invitedProfilePayload.designation = invite.designation;
-    if (invite.department) invitedProfilePayload.department = invite.department;
+    try {
+      await setDoc(userRef, profilePayload);
+      const createdSnap = await getDoc(userRef);
+      return createdSnap.exists() ? (createdSnap.data() as UserProfile) : null;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, userPath);
+    }
+  }
 
+  // 2. Check pre-authorized invitation record created by Super Admin or Org Admin
+  const invitePath = `invitedAccounts/${emailLower}`;
+  let inviteSnap;
+  try {
+    const inviteRef = doc(db, 'invitedAccounts', emailLower);
+    inviteSnap = await getDoc(inviteRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, invitePath);
+  }
+
+  if (!inviteSnap.exists()) {
+    return null;
+  }
+
+  const invite = inviteSnap.data() as InvitedAccount;
+  if (invite.status !== 'active') {
+    return {
+      uid,
+      email: emailLower,
+      displayName: invite.displayName || 'User',
+      role: invite.role,
+      organizationId: invite.organizationId,
+      organizationName: invite.organizationName,
+      permissions: invite.permissions || [],
+      status: invite.status,
+      accountStatus: invite.status,
+    };
+  }
+
+  const displayName = (firebaseUser.displayName || invite.displayName || 'Staff User').slice(0, 120);
+  const invitedProfilePayload: Record<string, unknown> = {
+    uid,
+    email: emailLower,
+    displayName,
+    fullName: displayName,
+    role: invite.role,
+    permissions: invite.permissions || [],
+    status: invite.status,
+    accountStatus: invite.status,
+    emailVerified: Boolean(firebaseUser.emailVerified),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    lastLoginAt: serverTimestamp(),
+  };
+
+  if (invite.phone) invitedProfilePayload.phone = invite.phone;
+  if (invite.loginId) invitedProfilePayload.loginId = invite.loginId;
+  if (invite.employeeId) invitedProfilePayload.employeeId = invite.employeeId;
+  if (invite.organizationId) invitedProfilePayload.organizationId = invite.organizationId;
+  if (invite.organizationName) invitedProfilePayload.organizationName = invite.organizationName;
+  if (invite.designation) invitedProfilePayload.designation = invite.designation;
+  if (invite.department) invitedProfilePayload.department = invite.department;
+
+  try {
     await setDoc(userRef, invitedProfilePayload);
     const createdInvitedSnap = await getDoc(userRef);
     return createdInvitedSnap.exists() ? (createdInvitedSnap.data() as UserProfile) : null;
   } catch (error) {
-    handleFirestoreError(error, OperationType.GET, userPath);
+    handleFirestoreError(error, OperationType.CREATE, userPath);
   }
 }

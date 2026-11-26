@@ -57,6 +57,7 @@
       "description": "Admin-provisioned account invitation keyed by lowercase email for secure login binding without overwriting admin sessions.",
       "type": "object",
       "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
         "email": { "type": "string", "format": "email", "maxLength": 160 },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "phone": { "type": "string", "maxLength": 40 },

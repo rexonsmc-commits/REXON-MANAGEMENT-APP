@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -25,9 +25,11 @@ const loginSchema = z.object({
 type LoginFormValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
-  const { userProfile, firebaseUser, loading, refreshProfile, signOut } = useAuth();
+  const { userProfile, firebaseUser, loading, authError, refreshProfile, signOut } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const prefilledEmail = searchParams.get('email')?.trim() || '';
 
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [verificationSending, setVerificationSending] = useState(false);
@@ -44,6 +46,9 @@ export function LoginPage() {
     formState: { errors },
   } = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
+    defaultValues: {
+      email: prefilledEmail,
+    },
   });
 
   useEffect(() => {
@@ -185,69 +190,121 @@ export function LoginPage() {
             Authenticate with your provisioned account credentials.
           </p>
 
-          {firebaseUser && !loading && !firebaseUser.emailVerified && (
-            <div className="mt-5 space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs text-amber-950">
-              <p className="font-semibold">Email Verification Required</p>
-              <p className="leading-relaxed">
-                Signed in as <strong>{firebaseUser.email}</strong>, but this email address is not
-                verified yet. Security rules require verified email status before provisioning or
-                loading workspace data.
-                {firebaseUser.email?.toLowerCase() === BOOTSTRAPPED_SUPER_ADMIN_EMAIL && (
-                  <>
-                    {' '}
-                    You can verify via email below or use <strong>Continue with Google</strong> for
-                    instant verified Super Admin access.
-                  </>
-                )}
-              </p>
-              <div className="flex flex-wrap gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => void handleSendVerification()}
-                  disabled={verificationSending || authSubmitting}
-                  className="rounded-md bg-[#1D4ED8] px-3 py-1.5 font-semibold text-white hover:bg-[#1E40AF] disabled:opacity-60"
-                >
-                  {verificationSending ? 'Sending...' : 'Send Verification Email'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleRefreshVerification()}
-                  disabled={authSubmitting}
-                  className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-60"
-                >
-                  I&apos;ve Verified — Refresh
-                </button>
+          {firebaseUser &&
+            !loading &&
+            !firebaseUser.emailVerified &&
+            firebaseUser.email?.toLowerCase() === BOOTSTRAPPED_SUPER_ADMIN_EMAIL && (
+              <div className="mt-5 space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs text-amber-950">
+                <p className="font-semibold">Email Verification Required</p>
+                <p className="leading-relaxed">
+                  Signed in as <strong>{firebaseUser.email}</strong>, but Super Admin access
+                  requires verified email status. Verify via email below or use{' '}
+                  <strong>Continue with Google</strong> for instant verified Super Admin access.
+                </p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleSendVerification()}
+                    disabled={verificationSending || authSubmitting}
+                    className="rounded-md bg-[#1D4ED8] px-3 py-1.5 font-semibold text-white hover:bg-[#1E40AF] disabled:opacity-60"
+                  >
+                    {verificationSending ? 'Sending...' : 'Send Verification Email'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshVerification()}
+                    disabled={authSubmitting}
+                    className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-60"
+                  >
+                    I&apos;ve Verified — Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            )}
+
+          {firebaseUser &&
+            !loading &&
+            !userProfile &&
+            !authError &&
+            (firebaseUser.emailVerified ||
+              firebaseUser.email?.toLowerCase() !== BOOTSTRAPPED_SUPER_ADMIN_EMAIL) && (
+              <div className="mt-5 space-y-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-950">
+                <p>
+                  Signed in as <strong>{firebaseUser.email}</strong>, but no active role record
+                  exists for this email yet. Ask your Super Admin or Organization Admin to provision
+                  your account.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshVerification()}
+                    disabled={authSubmitting}
+                    className="rounded-md bg-[#1D4ED8] px-3 py-1 font-semibold text-white hover:bg-[#1E40AF] disabled:opacity-60"
+                  >
+                    Retry Profile Sync
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    className="rounded-md border border-amber-300 bg-white px-3 py-1 font-medium text-amber-950 hover:bg-amber-100"
+                  >
+                    Sign Out & Switch Account
+                  </button>
+                </div>
+              </div>
+            )}
+
+          {firebaseUser &&
+            !loading &&
+            userProfile &&
+            (userProfile.accountStatus || userProfile.status) !== 'active' && (
+              <div className="mt-5 space-y-2.5 rounded-lg border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-800">
+                <p>
+                  Signed in as <strong>{firebaseUser.email}</strong>, but your account status is{' '}
+                  <strong className="uppercase">
+                    {userProfile.accountStatus || userProfile.status}
+                  </strong>
+                  . Contact your administrator to activate this account.
+                </p>
                 <button
                   type="button"
                   onClick={() => void signOut()}
-                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
+                  className="rounded-md border border-rose-300 bg-white px-3 py-1 font-medium text-rose-800 hover:bg-rose-100"
                 >
-                  Sign Out
+                  Sign Out & Switch Account
                 </button>
               </div>
-            </div>
-          )}
+            )}
 
-          {firebaseUser && !loading && firebaseUser.emailVerified && !userProfile && (
-            <div className="mt-5 space-y-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-950">
-              <p>
-                Signed in as <strong>{firebaseUser.email}</strong>, but no active role record
-                exists for this email yet. Ask your Super Admin or Organization Admin to provision
-                your account.
-              </p>
-              <button
-                type="button"
-                onClick={() => void signOut()}
-                className="rounded-md border border-amber-300 bg-white px-3 py-1 font-medium text-amber-950 hover:bg-amber-100"
-              >
-                Sign Out & Switch Account
-              </button>
-            </div>
-          )}
-
-          {errorMsg && (
-            <div className="mt-5 rounded-lg border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-700">
-              {errorMsg}
+          {(errorMsg || authError) && (
+            <div className="mt-5 space-y-2 rounded-lg border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-700">
+              <p>{errorMsg || parseFirebaseError(new Error(authError || '')).message}</p>
+              {firebaseUser && !userProfile && (
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshVerification()}
+                    disabled={authSubmitting}
+                    className="rounded-md bg-[#1D4ED8] px-3 py-1 font-semibold text-white hover:bg-[#1E40AF] disabled:opacity-60"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    className="rounded-md border border-rose-300 bg-white px-3 py-1 font-medium text-rose-800 hover:bg-rose-100"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

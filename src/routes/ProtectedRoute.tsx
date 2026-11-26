@@ -173,7 +173,7 @@ export function ProtectedRoute({
   targetOrganizationId,
   children,
 }: ProtectedRouteProps) {
-  const { firebaseUser, userProfile, loading, refreshProfile, signOut } = useAuth();
+  const { firebaseUser, userProfile, loading, authError, refreshProfile, signOut } = useAuth();
   const { showToast } = useToast();
   const location = useLocation();
   const [sendingVerification, setSendingVerification] = React.useState(false);
@@ -195,7 +195,7 @@ export function ProtectedRoute({
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  if (!firebaseUser.emailVerified) {
+  if (!firebaseUser.emailVerified && (!userProfile || userProfile.role === 'super_admin')) {
     const handleResend = async () => {
       setSendingVerification(true);
       try {
@@ -261,17 +261,32 @@ export function ProtectedRoute({
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-8">
           <h1 className="font-display text-xl font-bold text-slate-900">
-            Account Pending Provisioning
+            {authError ? 'Profile Sync Interrupted' : 'Account Pending Provisioning'}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">
-            You are signed in as <strong className="text-slate-900">{firebaseUser.email}</strong>,
-            but no active role assignment was found in Firestore for this account.
+            {authError ? (
+              authError
+            ) : (
+              <>
+                You are signed in as <strong className="text-slate-900">{firebaseUser.email}</strong>,
+                but no active role assignment was found in Firestore for this account.
+              </>
+            )}
           </p>
-          <p className="mt-3 text-xs leading-relaxed text-slate-500">
-            In REXON MANAGEMENT APP, roles cannot be self-selected. Ask your Super Admin or
-            Organization Admin to provision your email before signing in.
-          </p>
-          <div className="mt-6 flex items-center gap-3">
+          {!authError && (
+            <p className="mt-3 text-xs leading-relaxed text-slate-500">
+              In REXON MANAGEMENT APP, roles cannot be self-selected. Ask your Super Admin or
+              Organization Admin to provision your email before signing in.
+            </p>
+          )}
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void refreshProfile()}
+              className="rounded-lg bg-[#1D4ED8] px-4 py-2 text-sm font-medium text-white hover:bg-[#1E40AF]"
+            >
+              Retry Profile Sync
+            </button>
             <button
               type="button"
               onClick={() => void signOut()}

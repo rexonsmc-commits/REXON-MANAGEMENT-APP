@@ -84,7 +84,7 @@ export function DashboardLayout({ title, subtitle, actions, children }: Dashboar
 
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-[264px] flex-col border-r border-slate-800 bg-[#0B192C] text-slate-200 transition-transform duration-200 lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 flex w-[280px] flex-col border-r border-slate-800 bg-[#0B192C] text-slate-200 transition-transform duration-200 lg:static lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >

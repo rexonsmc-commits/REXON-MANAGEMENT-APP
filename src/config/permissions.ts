@@ -1,6 +1,7 @@
 import { OrgStaffPermissionKey, SuperAdminPermissionKey, UserRole } from '../types';
 
 export const BOOTSTRAPPED_SUPER_ADMIN_EMAIL = 'rexon.smc@gmail.com';
+export const BOOTSTRAPPED_SUPER_ADMIN_UID = 'Jn96avcVR3URxPV7g33ZukF1h8x1';
 
 export interface PermissionDefinition<T extends string> {
   key: T;
@@ -161,10 +162,10 @@ export const PERMISSION_ALIAS_MAP: Record<string, string[]> = {
   view_payments: ['platform.subscriptions.view'],
   manage_reports: ['platform.reports.view'],
   export_pdf: ['platform.reports.export', 'organization.reports.export'],
-  view_staff: ['organization.staff.view'],
-  view_properties: ['organization.properties.view'],
+  view_staff: ['organization.staff.view', 'manage_staff', 'organization.staff.create', 'organization.staff.edit'],
+  view_properties: ['organization.properties.view', 'manage_properties', 'organization.properties.manage'],
   manage_properties: ['organization.properties.manage'],
-  view_reports: ['organization.reports.view'],
+  view_reports: ['organization.reports.view', 'export_pdf', 'organization.reports.export'],
   access_settings: ['organization.profile.edit', 'platform.settings.view'],
   'platform.dashboard.view': ['view_dashboard'],
   'platform.organizations.view': ['manage_organizations'],

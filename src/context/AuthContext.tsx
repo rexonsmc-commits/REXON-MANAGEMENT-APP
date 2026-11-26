@@ -62,11 +62,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     setAuthError(null);
     try {
-      if (forceServerRefresh) {
-        await fbUser.getIdToken(true).catch(() => undefined);
+      let activeUser = fbUser;
+      if (!activeUser.emailVerified) {
+        await activeUser.reload().catch(() => undefined);
+        activeUser = auth.currentUser || activeUser;
+        setFirebaseUser(activeUser);
       }
 
-      const profile = await resolveTrustedUserProfile(fbUser, forceServerRefresh);
+      const tokenResult = await activeUser.getIdTokenResult().catch(() => null);
+      if (
+        forceServerRefresh ||
+        (activeUser.emailVerified && tokenResult?.claims?.email_verified !== true)
+      ) {
+        await activeUser.getIdToken(true).catch(() => undefined);
+      }
+
+      const profile = await resolveTrustedUserProfile(activeUser, forceServerRefresh);
       setUserProfile(profile);
 
       if (profile && getEffectiveAccountStatus(profile) === 'active') {

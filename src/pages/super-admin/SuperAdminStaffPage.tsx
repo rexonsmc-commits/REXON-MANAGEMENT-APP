@@ -1,23 +1,51 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Edit2, KeyRound, Plus, Power, Trash2 } from 'lucide-react';
+import {
+  Download,
+  Edit2,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Link2,
+  Plus,
+  Power,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react';
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { ColumnDef, DataTable } from '../../components/common/DataTable';
 import { ConfirmDialog, Modal } from '../../components/common/Modal';
+import {
+  generateStrongPassword,
+  LoginCredentialsModal,
+} from '../../components/common/LoginCredentialsModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import { SUPER_ADMIN_STAFF_PERMISSIONS } from '../../config/permissions';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import {
+  provisionFirebaseAuthCredentials,
+  syncProvisionedAccountProfile,
+} from '../../services/auth/authService';
+import {
   createSuperAdminStaff,
   deleteSuperAdminStaff,
-  issuePasswordSetupInvite,
   listSuperAdminStaff,
   updateSuperAdminStaff,
 } from '../../services/staff/staffService';
 import { exportTableToPdf } from '../../services/reports/pdfService';
 import { AccountStatus, SuperAdminPermissionKey, SuperAdminStaff } from '../../types';
 import { DEMO_SUPER_ADMIN_STAFF } from '../../utils/demoData';
+
+interface CredentialsModalState {
+  open: boolean;
+  staffId?: string;
+  targetName: string;
+  email: string;
+  loginId?: string;
+  initialPassword?: string;
+  authStatusMessage?: string;
+}
 
 export function SuperAdminStaffPage() {
   const { userProfile } = useAuth();
@@ -45,6 +73,16 @@ export function SuperAdminStaffPage() {
   const [assignedRole, setAssignedRole] = useState('');
   const [status, setStatus] = useState<AccountStatus>('active');
   const [permissions, setPermissions] = useState<SuperAdminPermissionKey[]>(['view_dashboard']);
+
+  // Firebase Auth Login ID & Password provisioning
+  const [createAuthCredentials, setCreateAuthCredentials] = useState(true);
+  const [initialPassword, setInitialPassword] = useState('');
+  const [showInitialPassword, setShowInitialPassword] = useState(false);
+  const [credentialsModal, setCredentialsModal] = useState<CredentialsModalState>({
+    open: false,
+    targetName: '',
+    email: '',
+  });
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -87,6 +125,9 @@ export function SuperAdminStaffPage() {
     setAssignedRole('Operations Analyst');
     setStatus('active');
     setPermissions(['view_dashboard']);
+    setCreateAuthCredentials(true);
+    setInitialPassword('');
+    setShowInitialPassword(false);
     setModalOpen(true);
   };
 
@@ -101,7 +142,20 @@ export function SuperAdminStaffPage() {
     setAssignedRole(staff.assignedRole);
     setStatus(staff.status);
     setPermissions(staff.permissions);
+    setCreateAuthCredentials(false);
+    setInitialPassword('');
+    setShowInitialPassword(false);
     setModalOpen(true);
+  };
+
+  const openCredentialsModalForStaff = (staff: SuperAdminStaff) => {
+    setCredentialsModal({
+      open: true,
+      staffId: staff.id,
+      targetName: staff.name,
+      email: staff.email,
+      loginId: staff.loginId,
+    });
   };
 
   const togglePermission = (key: SuperAdminPermissionKey) => {
@@ -115,6 +169,14 @@ export function SuperAdminStaffPage() {
     if (!userProfile) return;
     if (!name.trim() || !email.trim() || !designation.trim()) {
       showToast('Missing required fields', 'error', 'Name, email, and designation are required.');
+      return;
+    }
+    if (!editingStaff && createAuthCredentials && initialPassword.trim().length < 6) {
+      showToast(
+        'Password required',
+        'error',
+        'Enter a login password of at least 6 characters to save credentials in Firebase Authentication.'
+      );
       return;
     }
 
@@ -137,8 +199,9 @@ export function SuperAdminStaffPage() {
           userProfile
         );
         showToast('Staff permissions updated', 'success', `${name} updated cleanly.`);
+        setModalOpen(false);
       } else {
-        await createSuperAdminStaff(
+        const createdStaff = await createSuperAdminStaff(
           {
             name,
             email,
@@ -152,13 +215,52 @@ export function SuperAdminStaffPage() {
           },
           userProfile
         );
+
+        let authStatusMessage =
+          'Staff role provisioned in Firestore. Use the Login Credentials modal anytime to set or reset the password.';
+        let provisionedPassword: string | undefined;
+
+        if (createAuthCredentials && initialPassword.trim().length >= 6) {
+          const authRes = await provisionFirebaseAuthCredentials({
+            email,
+            password: initialPassword.trim(),
+            displayName: name,
+          });
+          authStatusMessage = authRes.message;
+          if (authRes.status === 'created') {
+            provisionedPassword = initialPassword.trim();
+            if (authRes.uid) {
+              await Promise.all([
+                updateSuperAdminStaff(
+                  createdStaff.id,
+                  { uid: authRes.uid },
+                  userProfile
+                ).catch(() => undefined),
+                syncProvisionedAccountProfile({
+                  uid: authRes.uid,
+                  email,
+                }),
+              ]);
+            }
+          }
+        }
+
         showToast(
           'Super Admin Staff provisioned',
           'success',
-          `${name} can now sign in with ${email} via Google or password setup.`
+          `${name} can now sign in with ${email}.`
         );
+        setModalOpen(false);
+        setCredentialsModal({
+          open: true,
+          staffId: createdStaff.id,
+          targetName: name.trim(),
+          email: email.trim().toLowerCase(),
+          loginId: loginId.trim() || undefined,
+          initialPassword: provisionedPassword,
+          authStatusMessage,
+        });
       }
-      setModalOpen(false);
       setDemoPreview(false);
       await loadData();
     } catch (err) {
@@ -177,15 +279,6 @@ export function SuperAdminStaffPage() {
       await loadData();
     } catch (err) {
       showToast('Status update failed', 'error', err instanceof Error ? err.message : undefined);
-    }
-  };
-
-  const handleSendInvite = async (staff: SuperAdminStaff) => {
-    try {
-      const msg = await issuePasswordSetupInvite(staff.email);
-      showToast('Password invite dispatched', 'success', msg);
-    } catch (err) {
-      showToast('Invite failed', 'error', err instanceof Error ? err.message : undefined);
     }
   };
 
@@ -263,13 +356,22 @@ export function SuperAdminStaffPage() {
     },
     {
       key: 'actions',
-      header: 'Actions',
+      header: 'Login Access & Actions',
       align: 'right',
       render: (s) =>
         demoPreview ? (
           <span className="text-xs text-slate-400">Preview only</span>
         ) : (
-          <div className="inline-flex items-center gap-1">
+          <div className="inline-flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => openCredentialsModalForStaff(s)}
+              className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-100"
+              title="Login ID, Password & Dashboard Login Link"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              <span>Login ID &amp; Pass</span>
+            </button>
             <button
               type="button"
               onClick={() => openEdit(s)}
@@ -277,14 +379,6 @@ export function SuperAdminStaffPage() {
               title="Edit staff & permissions"
             >
               <Edit2 className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleSendInvite(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-blue-50 hover:text-[#1D4ED8]"
-              title="Send password setup / reset invite"
-            >
-              <KeyRound className="h-4 w-4" />
             </button>
             <button
               type="button"
@@ -310,7 +404,7 @@ export function SuperAdminStaffPage() {
   return (
     <DashboardLayout
       title="Super Admin Staff Management"
-      subtitle="Provision global operations staff and independently assign or revoke granular platform permissions."
+      subtitle="Provision global operations staff, configure Firebase Auth login credentials, and assign granular platform permissions."
       actions={
         <div className="flex items-center gap-2">
           <button
@@ -365,7 +459,7 @@ export function SuperAdminStaffPage() {
             },
           ]}
           emptyTitle="No Super Admin Staff added yet"
-          emptyDescription="Add Super Admin Staff accounts and assign granular permissions without modifying your own session."
+          emptyDescription="Add Super Admin Staff accounts with Firebase login credentials and granular permissions."
           emptyAction={
             <button
               type="button"
@@ -383,7 +477,7 @@ export function SuperAdminStaffPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         title={editingStaff ? 'Edit Super Admin Staff' : 'Add Super Admin Staff'}
-        subtitle="Staff accounts authenticate via Firebase Auth without overwriting your Super Admin session."
+        subtitle="Provisions staff login credentials in Firebase Authentication without interrupting your Super Admin session."
         maxWidth="xl"
       >
         <form onSubmit={(e) => void handleSave(e)} className="space-y-5">
@@ -399,20 +493,6 @@ export function SuperAdminStaffPage() {
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700">Email *</label>
-              <input
-                type="email"
-                required
-                disabled={Boolean(editingStaff)}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100 focus:border-[#1D4ED8] focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
               <label className="block text-xs font-semibold text-slate-700">Phone</label>
               <input
                 type="text"
@@ -420,18 +500,6 @@ export function SuperAdminStaffPage() {
                 onChange={(e) => setPhone(e.target.value)}
                 placeholder="+1 (555) 000-0000"
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#1D4ED8] focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700">
-                Login ID (Optional)
-              </label>
-              <input
-                type="text"
-                value={loginId}
-                onChange={(e) => setLoginId(e.target.value)}
-                placeholder="e.g. ops.lead"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono focus:border-[#1D4ED8] focus:outline-none"
               />
             </div>
           </div>
@@ -469,6 +537,113 @@ export function SuperAdminStaffPage() {
             </div>
           </div>
 
+          {/* Login ID & Password Provisioning Link */}
+          <div className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <KeyRound className="h-4 w-4 text-[#1D4ED8]" />
+                <span className="text-xs font-bold text-slate-900">
+                  Login ID &amp; Password Link (Firebase Authentication)
+                </span>
+              </div>
+              {editingStaff ? (
+                <button
+                  type="button"
+                  onClick={() => openCredentialsModalForStaff(editingStaff)}
+                  className="inline-flex items-center gap-1 rounded-md border border-blue-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-50"
+                >
+                  <Link2 className="h-3 w-3" />
+                  <span>Open Login Link &amp; Password Setup</span>
+                </button>
+              ) : (
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={createAuthCredentials}
+                    onChange={(e) => setCreateAuthCredentials(e.target.checked)}
+                    className="rounded border-slate-300 text-[#1D4ED8]"
+                  />
+                  <span>Save Login ID &amp; Password to Firebase Auth now</span>
+                </label>
+              )}
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Staff Login Email (Login ID) *
+                </label>
+                <input
+                  type="email"
+                  required
+                  disabled={Boolean(editingStaff)}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="staff@rexon.com"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:bg-slate-100 focus:border-[#1D4ED8] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Short Login ID (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={loginId}
+                  onChange={(e) => setLoginId(e.target.value)}
+                  placeholder="e.g. ops.lead"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#1D4ED8] focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {!editingStaff && createAuthCredentials && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Initial Login Password * (min 6 chars)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInitialPassword(generateStrongPassword());
+                      setShowInitialPassword(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#1D4ED8] hover:underline"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Generate Password</span>
+                  </button>
+                </div>
+                <div className="relative mt-1">
+                  <input
+                    type={showInitialPassword ? 'text' : 'password'}
+                    value={initialPassword}
+                    onChange={(e) => setInitialPassword(e.target.value)}
+                    placeholder="Set password for Staff dashboard login"
+                    className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-sm focus:border-[#1D4ED8] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowInitialPassword((prev) => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    aria-label={showInitialPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showInitialPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Saved directly in Firebase Authentication without disturbing your Super Admin session.
+                </p>
+              </div>
+            )}
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold text-slate-700">Account Status</label>
@@ -483,11 +658,6 @@ export function SuperAdminStaffPage() {
                 <option value="suspended">Suspended</option>
                 <option value="disabled">Disabled</option>
               </select>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-              <strong className="text-slate-800">Password Setup:</strong> Staff authenticate with
-              Google Sign-In or trigger a Firebase password setup/reset link. Plain-text passwords
-              are never stored in Firestore.
             </div>
           </div>
 
@@ -546,6 +716,38 @@ export function SuperAdminStaffPage() {
           </div>
         </form>
       </Modal>
+
+      <LoginCredentialsModal
+        open={credentialsModal.open}
+        onClose={() =>
+          setCredentialsModal((prev) => ({
+            ...prev,
+            open: false,
+            initialPassword: undefined,
+            authStatusMessage: undefined,
+          }))
+        }
+        entityLabel="Super Admin Staff"
+        targetName={credentialsModal.targetName}
+        email={credentialsModal.email}
+        loginId={credentialsModal.loginId}
+        initialPassword={credentialsModal.initialPassword}
+        authStatusMessage={credentialsModal.authStatusMessage}
+        onAuthProvisioned={async (uid) => {
+          if (credentialsModal.staffId && userProfile) {
+            await Promise.all([
+              updateSuperAdminStaff(credentialsModal.staffId, { uid }, userProfile).catch(
+                () => undefined
+              ),
+              syncProvisionedAccountProfile({
+                uid,
+                email: credentialsModal.email,
+              }),
+            ]);
+            await loadData();
+          }
+        }}
+      />
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}

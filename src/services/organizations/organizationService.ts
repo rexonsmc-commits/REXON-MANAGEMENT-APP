@@ -217,21 +217,37 @@ export async function updateOrganization(
     const startDate = updates.subscriptionStartDate ?? current.subscriptionStartDate;
     const expiryDate = updates.subscriptionExpiryDate ?? current.subscriptionExpiryDate;
     const adminLoginId = updates.adminLoginId ?? current.adminLoginId;
+    const adminUid = updates.adminUid ?? current.adminUid;
     if (planId) payload.subscriptionPlanId = planId;
     if (planName) payload.subscriptionPlanName = planName;
     if (startDate) payload.subscriptionStartDate = startDate;
     if (expiryDate) payload.subscriptionExpiryDate = expiryDate;
     if (adminLoginId) payload.adminLoginId = adminLoginId;
-    if (current.adminUid) payload.adminUid = current.adminUid;
+    if (adminUid) payload.adminUid = adminUid;
 
     await updateDoc(doc(db, 'organizations', orgId), payload);
+
+    const adminEmailLower = String(payload.adminLoginEmail).toLowerCase();
+    try {
+      const inviteSnap = await getDoc(doc(db, 'invitedAccounts', adminEmailLower));
+      if (inviteSnap.exists()) {
+        await updateDoc(doc(db, 'invitedAccounts', adminEmailLower), {
+          displayName: payload.contactPerson,
+          organizationName: payload.name,
+          status: payload.accountStatus,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch {
+      // Staff without manage_staff may not update invitedAccounts; org update still succeeds
+    }
 
     await createAuditLog(actor, {
       organizationId: orgId,
       action: 'UPDATE_ORGANIZATION',
       targetCollection: 'organizations',
       targetId: orgId,
-      summary: `Updated organization "${String(payload.name)}" (${String(payload.accountStatus)})`,
+      summary: `Updated company/society "${String(payload.name)}" (${String(payload.accountStatus)})`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `organizations/${orgId}`);

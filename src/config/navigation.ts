@@ -23,7 +23,7 @@ export interface NavItem {
 export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
   super_admin: [
     { label: 'Dashboard', path: '/super-admin/dashboard', iconName: 'LayoutDashboard' },
-    { label: 'Organization Management', path: '/super-admin/organizations', iconName: 'Building2' },
+    { label: 'Company / Society Management', path: '/super-admin/organizations', iconName: 'Building2' },
     { label: 'Staff Management', path: '/super-admin/staff', iconName: 'Users' },
     { label: 'Subscription Plans', path: '/super-admin/plans', iconName: 'CreditCard' },
     { label: 'Payments', path: '/super-admin/payments', iconName: 'Receipt' },
@@ -34,7 +34,7 @@ export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
   super_admin_staff: [
     { label: 'Dashboard', path: '/super-admin-staff/dashboard', iconName: 'LayoutDashboard' },
     {
-      label: 'Organizations',
+      label: 'Company / Society',
       path: '/super-admin-staff/organizations',
       iconName: 'Building2',
       requiredPermission: 'manage_organizations',
@@ -69,7 +69,6 @@ export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
     { label: 'Dashboard', path: '/organization-admin/dashboard', iconName: 'LayoutDashboard' },
     { label: 'Organization Profile', path: '/organization-admin/profile', iconName: 'Building2' },
     { label: 'Staff Management', path: '/organization-admin/staff', iconName: 'Users' },
-    { label: 'Roles & Permissions', path: '/organization-admin/roles', iconName: 'ShieldCheck' },
     { label: 'Property Management', path: '/organization-admin/properties', iconName: 'Home' },
     { label: 'Tower Management', path: '/organization-admin/towers', iconName: 'Building' },
     { label: 'Wing Management', path: '/organization-admin/wings', iconName: 'Layers' },

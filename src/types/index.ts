@@ -112,6 +112,7 @@ export interface UserProfile {
 }
 
 export interface InvitedAccount {
+  uid?: string;
   email: string;
   displayName: string;
   phone?: string;

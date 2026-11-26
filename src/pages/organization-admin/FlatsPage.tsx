@@ -53,6 +53,7 @@ export function FlatsPage() {
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
   const orgId = userProfile?.organizationId || '';
+  const isOrgStaff = userProfile?.role === 'organization_staff';
   const canManage = userProfile?.role === 'organization_admin' || hasPermission('manage_properties');
   const canExport = userProfile?.role === 'organization_admin' || hasPermission('export_pdf');
 
@@ -82,8 +83,9 @@ export function FlatsPage() {
     void loadData();
   }, [loadData]);
 
-  const activeTowers = demoPreview ? DEMO_TOWERS : towers;
-  const activeFlats = demoPreview ? DEMO_FLATS : flats;
+  const effectiveDemo = !isOrgStaff && demoPreview;
+  const activeTowers = effectiveDemo ? DEMO_TOWERS : towers;
+  const activeFlats = effectiveDemo ? DEMO_FLATS : flats;
 
   const wingsForSelectedTower = useMemo(
     () => wings.filter((w) => w.towerId === towerId),
@@ -276,8 +278,8 @@ export function FlatsPage() {
       header: 'Actions',
       align: 'right',
       render: (f) =>
-        demoPreview || !canManage ? (
-          <span className="text-xs text-slate-400">{demoPreview ? 'Preview only' : 'View only'}</span>
+        effectiveDemo || !canManage ? (
+          <span className="text-xs text-slate-400">{effectiveDemo ? 'Preview only' : 'View only'}</span>
         ) : (
           <div className="inline-flex items-center gap-1">
             <button
@@ -333,12 +335,14 @@ export function FlatsPage() {
       }
     >
       <div className="space-y-5">
-        <DemoDataBanner
-          isDemoMode={demoPreview}
-          onToggleDemo={() => setDemoPreview((p) => !p)}
-          liveCount={flats.length}
-          label="flats"
-        />
+        {!isOrgStaff && (
+          <DemoDataBanner
+            isDemoMode={demoPreview}
+            onToggleDemo={() => setDemoPreview((p) => !p)}
+            liveCount={flats.length}
+            label="flats"
+          />
+        )}
 
         <DataTable
           data={filtered}

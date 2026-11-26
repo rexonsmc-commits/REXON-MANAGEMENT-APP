@@ -165,7 +165,7 @@ export function OrgAdminDashboard() {
             <div className="mt-4 space-y-2.5">
               {[
                 { label: 'Add & Manage Staff', to: '/organization-admin/staff' },
-                { label: 'Configure Role Templates', to: '/organization-admin/roles' },
+                { label: 'Configure Role Templates', to: '/organization-admin/staff?tab=roles' },
                 { label: 'Manage Towers', to: '/organization-admin/towers' },
                 { label: 'Manage Wings', to: '/organization-admin/wings' },
                 { label: 'Manage Flats & Occupancy', to: '/organization-admin/flats' },

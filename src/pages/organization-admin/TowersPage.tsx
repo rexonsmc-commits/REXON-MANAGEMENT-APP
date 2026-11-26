@@ -39,6 +39,7 @@ export function TowersPage() {
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
   const orgId = userProfile?.organizationId || '';
+  const isOrgStaff = userProfile?.role === 'organization_staff';
   const canManage = userProfile?.role === 'organization_admin' || hasPermission('manage_properties');
   const canExport = userProfile?.role === 'organization_admin' || hasPermission('export_pdf');
 
@@ -61,7 +62,8 @@ export function TowersPage() {
     void loadData();
   }, [loadData]);
 
-  const activeData = demoPreview ? DEMO_TOWERS : towers;
+  const effectiveDemo = !isOrgStaff && demoPreview;
+  const activeData = effectiveDemo ? DEMO_TOWERS : towers;
 
   const filtered = useMemo(() => {
     return activeData.filter((t) => {
@@ -173,8 +175,8 @@ export function TowersPage() {
       header: 'Actions',
       align: 'right',
       render: (t) =>
-        demoPreview || !canManage ? (
-          <span className="text-xs text-slate-400">{demoPreview ? 'Preview only' : 'View only'}</span>
+        effectiveDemo || !canManage ? (
+          <span className="text-xs text-slate-400">{effectiveDemo ? 'Preview only' : 'View only'}</span>
         ) : (
           <div className="inline-flex items-center gap-1">
             <button
@@ -230,12 +232,14 @@ export function TowersPage() {
       }
     >
       <div className="space-y-5">
-        <DemoDataBanner
-          isDemoMode={demoPreview}
-          onToggleDemo={() => setDemoPreview((p) => !p)}
-          liveCount={towers.length}
-          label="towers"
-        />
+        {!isOrgStaff && (
+          <DemoDataBanner
+            isDemoMode={demoPreview}
+            onToggleDemo={() => setDemoPreview((p) => !p)}
+            liveCount={towers.length}
+            label="towers"
+          />
+        )}
 
         <DataTable
           data={filtered}

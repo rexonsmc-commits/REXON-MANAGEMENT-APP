@@ -17,8 +17,8 @@ export function PropertyOverviewPage() {
   const [demoPreview, setDemoPreview] = useState(false);
 
   const orgId = userProfile?.organizationId || '';
-  const basePrefix =
-    userProfile?.role === 'organization_staff' ? '/organization-staff' : '/organization-admin';
+  const isOrgStaff = userProfile?.role === 'organization_staff';
+  const basePrefix = isOrgStaff ? '/organization-staff' : '/organization-admin';
 
   useEffect(() => {
     if (!orgId) return;
@@ -30,15 +30,16 @@ export function PropertyOverviewPage() {
       setTowers(t);
       setWings(w);
       setFlats(f);
-      if (t.length === 0 && w.length === 0 && f.length === 0) {
+      if (!isOrgStaff && t.length === 0 && w.length === 0 && f.length === 0) {
         setDemoPreview(true);
       }
     });
-  }, [orgId]);
+  }, [orgId, isOrgStaff]);
 
-  const activeTowers = demoPreview ? DEMO_TOWERS : towers;
-  const activeWings = demoPreview ? DEMO_WINGS : wings;
-  const activeFlats = demoPreview ? DEMO_FLATS : flats;
+  const effectiveDemo = !isOrgStaff && demoPreview;
+  const activeTowers = effectiveDemo ? DEMO_TOWERS : towers;
+  const activeWings = effectiveDemo ? DEMO_WINGS : wings;
+  const activeFlats = effectiveDemo ? DEMO_FLATS : flats;
 
   return (
     <DashboardLayout
@@ -46,12 +47,14 @@ export function PropertyOverviewPage() {
       subtitle="Hierarchical view of your organization's Towers, Wings, and Flat occupancy directory."
     >
       <div className="space-y-6">
-        <DemoDataBanner
-          isDemoMode={demoPreview}
-          onToggleDemo={() => setDemoPreview((p) => !p)}
-          liveCount={towers.length + wings.length + flats.length}
-          label="property records"
-        />
+        {!isOrgStaff && (
+          <DemoDataBanner
+            isDemoMode={demoPreview}
+            onToggleDemo={() => setDemoPreview((p) => !p)}
+            liveCount={towers.length + wings.length + flats.length}
+            label="property records"
+          />
+        )}
 
         <div className="grid gap-4 sm:grid-cols-3">
           <KpiCard

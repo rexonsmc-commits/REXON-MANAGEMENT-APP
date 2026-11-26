@@ -2,28 +2,38 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Download, Edit2, KeyRound, Plus, Trash2 } from 'lucide-react';
+import { Download, Edit2, Eye, EyeOff, KeyRound, Link2, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { ColumnDef, DataTable } from '../../components/common/DataTable';
 import { ConfirmDialog, Modal } from '../../components/common/Modal';
+import {
+  generateStrongPassword,
+  LoginCredentialsModal,
+} from '../../components/common/LoginCredentialsModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import {
+  provisionFirebaseAuthCredentials,
+  syncProvisionedAccountProfile,
+} from '../../services/auth/authService';
 import {
   createOrganization,
   deleteOrganization,
   listOrganizations,
   updateOrganization,
 } from '../../services/organizations/organizationService';
-import { issuePasswordSetupInvite } from '../../services/staff/staffService';
-import { listAllSubscriptionPlans } from '../../services/subscriptions/subscriptionService';
+import {
+  listAllSubscriptionPlans,
+  listPublicSubscriptionPlans,
+} from '../../services/subscriptions/subscriptionService';
 import { exportTableToPdf } from '../../services/reports/pdfService';
 import { Organization, OrganizationType, SubscriptionPlan } from '../../types';
 import { DEMO_ORGANIZATIONS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
 
 const orgSchema = z.object({
-  name: z.string().min(2, 'Organization name required').max(160),
+  name: z.string().min(2, 'Company / Society name required').max(160),
   type: z.enum([
     'Company',
     'Factory',
@@ -48,6 +58,16 @@ const orgSchema = z.object({
 
 type OrgFormValues = z.infer<typeof orgSchema>;
 
+interface CredentialsModalState {
+  open: boolean;
+  orgId?: string;
+  targetName: string;
+  email: string;
+  loginId?: string;
+  initialPassword?: string;
+  authStatusMessage?: string;
+}
+
 export function OrganizationsPage() {
   const { userProfile, hasPermission } = useAuth();
   const { showToast } = useToast();
@@ -65,6 +85,16 @@ export function OrganizationsPage() {
   const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Organization | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Firebase Auth credential provisioning on create
+  const [createAuthCredentials, setCreateAuthCredentials] = useState(true);
+  const [initialPassword, setInitialPassword] = useState('');
+  const [showInitialPassword, setShowInitialPassword] = useState(false);
+  const [credentialsModal, setCredentialsModal] = useState<CredentialsModalState>({
+    open: false,
+    targetName: '',
+    email: '',
+  });
 
   const canCreate = userProfile?.role === 'super_admin' || hasPermission('create_organizations') || hasPermission('manage_organizations');
   const canEdit = userProfile?.role === 'super_admin' || hasPermission('edit_organizations') || hasPermission('manage_organizations');
@@ -88,9 +118,15 @@ export function OrganizationsPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
+      const canListAllPlans =
+        userProfile?.role === 'super_admin' ||
+        hasPermission('manage_plans') ||
+        hasPermission('view_payments');
       const [orgsData, plansData] = await Promise.all([
         listOrganizations(),
-        listAllSubscriptionPlans().catch(() => []),
+        (canListAllPlans ? listAllSubscriptionPlans() : listPublicSubscriptionPlans()).catch(
+          () => []
+        ),
       ]);
       setOrganizations(orgsData);
       if (plansData.length > 0) setPlans(plansData);
@@ -99,7 +135,7 @@ export function OrganizationsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, userProfile?.role, hasPermission]);
 
   useEffect(() => {
     void loadData();
@@ -122,6 +158,9 @@ export function OrganizationsPage() {
 
   const openCreateModal = () => {
     setEditingOrg(null);
+    setCreateAuthCredentials(true);
+    setInitialPassword('');
+    setShowInitialPassword(false);
     reset({
       name: '',
       type: 'Society',
@@ -132,7 +171,7 @@ export function OrganizationsPage() {
       adminLoginEmail: '',
       adminLoginId: '',
       subscriptionPlanId: plans[0]?.id || '',
-      subscriptionStatus: 'Pending',
+      subscriptionStatus: 'Active',
       subscriptionStartDate: new Date().toISOString().slice(0, 10),
       subscriptionExpiryDate: new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 10),
       accountStatus: 'active',
@@ -142,6 +181,9 @@ export function OrganizationsPage() {
 
   const openEditModal = (org: Organization) => {
     setEditingOrg(org);
+    setCreateAuthCredentials(false);
+    setInitialPassword('');
+    setShowInitialPassword(false);
     reset({
       name: org.name,
       type: org.type,
@@ -160,8 +202,27 @@ export function OrganizationsPage() {
     setModalOpen(true);
   };
 
+  const openCredentialsModalForOrg = (org: Organization) => {
+    setCredentialsModal({
+      open: true,
+      orgId: org.id,
+      targetName: org.name,
+      email: org.adminLoginEmail,
+      loginId: org.adminLoginId,
+    });
+  };
+
   const onSubmit = async (values: OrgFormValues) => {
     if (!userProfile) return;
+    if (!editingOrg && createAuthCredentials && initialPassword.trim().length < 6) {
+      showToast(
+        'Password required',
+        'error',
+        'Enter a login password of at least 6 characters to save credentials in Firebase Authentication.'
+      );
+      return;
+    }
+
     const selectedPlan = plans.find((p) => p.id === values.subscriptionPlanId);
 
     try {
@@ -174,9 +235,10 @@ export function OrganizationsPage() {
           },
           userProfile
         );
-        showToast('Organization updated', 'success', `${values.name} saved to Firestore.`);
+        showToast('Company / Society updated', 'success', `${values.name} saved to Firestore.`);
+        setModalOpen(false);
       } else {
-        await createOrganization(
+        const createdOrg = await createOrganization(
           {
             name: values.name,
             type: values.type as OrganizationType,
@@ -195,26 +257,56 @@ export function OrganizationsPage() {
           },
           userProfile
         );
+
+        let authStatusMessage =
+          'Tenant record and admin invite provisioned in Firestore. Use the Login Credentials modal anytime to set or reset the password.';
+        let provisionedPassword: string | undefined;
+
+        if (createAuthCredentials && initialPassword.trim().length >= 6) {
+          const authRes = await provisionFirebaseAuthCredentials({
+            email: values.adminLoginEmail,
+            password: initialPassword.trim(),
+            displayName: values.contactPerson,
+          });
+          authStatusMessage = authRes.message;
+          if (authRes.status === 'created') {
+            provisionedPassword = initialPassword.trim();
+            if (authRes.uid) {
+              await Promise.all([
+                updateOrganization(
+                  createdOrg.id,
+                  { adminUid: authRes.uid },
+                  userProfile
+                ).catch(() => undefined),
+                syncProvisionedAccountProfile({
+                  uid: authRes.uid,
+                  email: values.adminLoginEmail,
+                }),
+              ]);
+            }
+          }
+        }
+
         showToast(
-          'Organization provisioned',
+          'Company / Society created',
           'success',
-          `${values.name} and admin invite (${values.adminLoginEmail}) created.`
+          `${values.name} provisioned for ${values.adminLoginEmail}.`
         );
+        setModalOpen(false);
+        setCredentialsModal({
+          open: true,
+          orgId: createdOrg.id,
+          targetName: values.name,
+          email: values.adminLoginEmail.trim().toLowerCase(),
+          loginId: values.adminLoginId?.trim() || undefined,
+          initialPassword: provisionedPassword,
+          authStatusMessage,
+        });
       }
-      setModalOpen(false);
       setDemoPreview(false);
       await loadData();
     } catch (err) {
       showToast('Save failed', 'error', err instanceof Error ? err.message : 'Operation denied');
-    }
-  };
-
-  const handleSendAdminInvite = async (org: Organization) => {
-    try {
-      const msg = await issuePasswordSetupInvite(org.adminLoginEmail);
-      showToast('Password invite dispatched', 'success', msg);
-    } catch (err) {
-      showToast('Invite failed', 'error', err instanceof Error ? err.message : undefined);
     }
   };
 
@@ -223,7 +315,7 @@ export function OrganizationsPage() {
     setDeleting(true);
     try {
       await deleteOrganization(deleteTarget.id, deleteTarget.name, userProfile);
-      showToast('Organization deleted', 'success', `${deleteTarget.name} removed.`);
+      showToast('Company / Society deleted', 'success', `${deleteTarget.name} removed.`);
       setDeleteTarget(null);
       await loadData();
     } catch (err) {
@@ -235,10 +327,10 @@ export function OrganizationsPage() {
 
   const handleExportPdf = () => {
     exportTableToPdf({
-      title: 'Registered Organizations Report',
+      title: 'Registered Companies & Societies Report',
       subtitle: demoPreview ? 'Source: Visual Preview Demo Data' : 'Source: Live Firestore Database',
       generatedBy: userProfile?.email || 'Super Admin',
-      columns: ['Organization', 'Type', 'Contact Person', 'Admin Login', 'Plan', 'Sub Status', 'Account'],
+      columns: ['Company / Society', 'Type', 'Contact Person', 'Admin Login', 'Plan', 'Sub Status', 'Account'],
       rows: filteredData.map((o) => [
         o.name,
         o.type,
@@ -248,14 +340,14 @@ export function OrganizationsPage() {
         o.subscriptionStatus,
         o.accountStatus,
       ]),
-      filename: 'rexon-organizations-report',
+      filename: 'rexon-companies-societies-report',
     });
   };
 
   const columns: ColumnDef<Organization>[] = [
     {
       key: 'name',
-      header: 'Organization Name',
+      header: 'Company / Society Name',
       sortable: true,
       sortValue: (o) => o.name,
       render: (o) => (
@@ -306,7 +398,7 @@ export function OrganizationsPage() {
     },
     {
       key: 'actions',
-      header: 'Actions',
+      header: 'Login Access & Actions',
       align: 'right',
       render: (o) =>
         demoPreview ? (
@@ -317,19 +409,20 @@ export function OrganizationsPage() {
               <>
                 <button
                   type="button"
-                  onClick={() => openEditModal(o)}
-                  className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#1D4ED8]"
-                  title="Edit organization"
+                  onClick={() => openCredentialsModalForOrg(o)}
+                  className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-100"
+                  title="Login ID, Password & Dashboard Login Link"
                 >
-                  <Edit2 className="h-4 w-4" />
+                  <KeyRound className="h-3.5 w-3.5" />
+                  <span>Login ID &amp; Pass</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleSendAdminInvite(o)}
-                  className="rounded-md p-1.5 text-slate-500 hover:bg-blue-50 hover:text-[#1D4ED8]"
-                  title="Send password setup / reset invite"
+                  onClick={() => openEditModal(o)}
+                  className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#1D4ED8]"
+                  title="Edit company / society"
                 >
-                  <KeyRound className="h-4 w-4" />
+                  <Edit2 className="h-4 w-4" />
                 </button>
               </>
             )}
@@ -338,7 +431,7 @@ export function OrganizationsPage() {
                 type="button"
                 onClick={() => setDeleteTarget(o)}
                 className="rounded-md p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
-                title="Delete organization"
+                title="Delete company / society"
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -350,8 +443,8 @@ export function OrganizationsPage() {
 
   return (
     <DashboardLayout
-      title="Organization Management"
-      subtitle="Provision and govern isolated multi-tenant workspaces for companies, factories, societies, and industries."
+      title="Company / Society Management"
+      subtitle="Provision and govern isolated multi-tenant workspaces and login credentials for companies, societies, factories, and industries."
       actions={
         <div className="flex items-center gap-2">
           {canExport && (
@@ -371,7 +464,7 @@ export function OrganizationsPage() {
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#1D4ED8] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#1E40AF] whitespace-nowrap"
             >
               <Plus className="h-4 w-4" />
-              <span>Create Organization</span>
+              <span>Create Company / Society</span>
             </button>
           )}
         </div>
@@ -382,7 +475,7 @@ export function OrganizationsPage() {
           isDemoMode={demoPreview}
           onToggleDemo={() => setDemoPreview((p) => !p)}
           liveCount={organizations.length}
-          label="organizations"
+          label="companies & societies"
         />
 
         <DataTable
@@ -392,11 +485,11 @@ export function OrganizationsPage() {
           loading={loading}
           searchValue={search}
           onSearchChange={setSearch}
-          searchPlaceholder="Search organization, contact, or admin email..."
+          searchPlaceholder="Search company, society, contact, or admin email..."
           filters={[
             {
               key: 'type',
-              label: 'Filter by organization type',
+              label: 'Filter by type',
               value: typeFilter,
               onChange: setTypeFilter,
               options: [
@@ -425,8 +518,8 @@ export function OrganizationsPage() {
               ],
             },
           ]}
-          emptyTitle="No organizations provisioned yet"
-          emptyDescription="Create your first company, factory, or residential society tenant workspace to begin."
+          emptyTitle="No companies or societies provisioned yet"
+          emptyDescription="Create your first company, society, or factory workspace with login ID and password access."
           emptyAction={
             canCreate && (
               <button
@@ -434,7 +527,7 @@ export function OrganizationsPage() {
                 onClick={openCreateModal}
                 className="rounded-lg bg-[#1D4ED8] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E40AF]"
               >
-                Create First Organization
+                Create First Company / Society
               </button>
             )
           }
@@ -445,15 +538,15 @@ export function OrganizationsPage() {
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editingOrg ? 'Edit Organization' : 'Create Organization'}
-        subtitle="Creating an organization provisions an isolated tenant boundary and pre-authorizes its Organization Admin email."
+        title={editingOrg ? 'Edit Company / Society' : 'Create Company / Society'}
+        subtitle="Creates an isolated tenant dashboard and provisions login credentials in Firebase Authentication."
         maxWidth="xl"
       >
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold text-slate-700">
-                Organization Name *
+                Company / Society Name *
               </label>
               <input
                 type="text"
@@ -465,7 +558,7 @@ export function OrganizationsPage() {
 
             <div>
               <label className="block text-xs font-semibold text-slate-700">
-                Organization Type *
+                Category / Type *
               </label>
               <select
                 {...register('type')}
@@ -509,7 +602,7 @@ export function OrganizationsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold text-slate-700">
-                Organization Contact Email *
+                Company / Society Contact Email *
               </label>
               <input
                 type="email"
@@ -517,35 +610,6 @@ export function OrganizationsPage() {
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#1D4ED8] focus:outline-none"
               />
               {errors.email && <p className="mt-1 text-xs text-rose-600">{errors.email.message}</p>}
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700">
-                Organization Admin Login Email *
-              </label>
-              <input
-                type="email"
-                {...register('adminLoginEmail')}
-                placeholder="admin@tenant-org.com"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-[#1D4ED8] focus:outline-none"
-              />
-              {errors.adminLoginEmail && (
-                <p className="mt-1 text-xs text-rose-600">{errors.adminLoginEmail.message}</p>
-              )}
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700">
-                Admin Login ID (Optional)
-              </label>
-              <input
-                type="text"
-                {...register('adminLoginId')}
-                placeholder="e.g. apex.admin"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono focus:border-[#1D4ED8] focus:outline-none"
-              />
             </div>
 
             <div>
@@ -559,6 +623,108 @@ export function OrganizationsPage() {
                 <p className="mt-1 text-xs text-rose-600">{errors.address.message}</p>
               )}
             </div>
+          </div>
+
+          {/* Login ID & Password Provisioning Link */}
+          <div className="space-y-3 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <KeyRound className="h-4 w-4 text-[#1D4ED8]" />
+                <span className="text-xs font-bold text-slate-900">
+                  Login ID &amp; Password Link (Firebase Authentication)
+                </span>
+              </div>
+              {editingOrg ? (
+                <button
+                  type="button"
+                  onClick={() => openCredentialsModalForOrg(editingOrg)}
+                  className="inline-flex items-center gap-1 rounded-md border border-blue-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-50"
+                >
+                  <Link2 className="h-3 w-3" />
+                  <span>Open Login Link &amp; Password Setup</span>
+                </button>
+              ) : (
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={createAuthCredentials}
+                    onChange={(e) => setCreateAuthCredentials(e.target.checked)}
+                    className="rounded border-slate-300 text-[#1D4ED8]"
+                  />
+                  <span>Save Login ID &amp; Password to Firebase Auth now</span>
+                </label>
+              )}
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Admin Login Email (Login ID) *
+                </label>
+                <input
+                  type="email"
+                  {...register('adminLoginEmail')}
+                  placeholder="admin@company-or-society.com"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-[#1D4ED8] focus:outline-none"
+                />
+                {errors.adminLoginEmail && (
+                  <p className="mt-1 text-xs text-rose-600">{errors.adminLoginEmail.message}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700">
+                  Short Login ID (Optional)
+                </label>
+                <input
+                  type="text"
+                  {...register('adminLoginId')}
+                  placeholder="e.g. apex.society"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono focus:border-[#1D4ED8] focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {!editingOrg && createAuthCredentials && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Initial Login Password * (min 6 chars)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInitialPassword(generateStrongPassword());
+                      setShowInitialPassword(true);
+                    }}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#1D4ED8] hover:underline"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Generate Password</span>
+                  </button>
+                </div>
+                <div className="relative mt-1">
+                  <input
+                    type={showInitialPassword ? 'text' : 'password'}
+                    value={initialPassword}
+                    onChange={(e) => setInitialPassword(e.target.value)}
+                    placeholder="Set password for Company / Society dashboard login"
+                    className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-3 pr-10 text-sm focus:border-[#1D4ED8] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowInitialPassword((prev) => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    aria-label={showInitialPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showInitialPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Saved directly in Firebase Authentication without disturbing your Super Admin session.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -641,20 +807,52 @@ export function OrganizationsPage() {
               disabled={isSubmitting}
               className="rounded-lg bg-[#1D4ED8] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E40AF] disabled:opacity-60"
             >
-              {isSubmitting ? 'Saving...' : editingOrg ? 'Save Changes' : 'Create Organization'}
+              {isSubmitting ? 'Saving...' : editingOrg ? 'Save Changes' : 'Create Company / Society'}
             </button>
           </div>
         </form>
       </Modal>
+
+      <LoginCredentialsModal
+        open={credentialsModal.open}
+        onClose={() =>
+          setCredentialsModal((prev) => ({
+            ...prev,
+            open: false,
+            initialPassword: undefined,
+            authStatusMessage: undefined,
+          }))
+        }
+        entityLabel="Company / Society Admin"
+        targetName={credentialsModal.targetName}
+        email={credentialsModal.email}
+        loginId={credentialsModal.loginId}
+        initialPassword={credentialsModal.initialPassword}
+        authStatusMessage={credentialsModal.authStatusMessage}
+        onAuthProvisioned={async (uid) => {
+          if (credentialsModal.orgId && userProfile) {
+            await Promise.all([
+              updateOrganization(credentialsModal.orgId, { adminUid: uid }, userProfile).catch(
+                () => undefined
+              ),
+              syncProvisionedAccountProfile({
+                uid,
+                email: credentialsModal.email,
+              }),
+            ]);
+            await loadData();
+          }
+        }}
+      />
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
         loading={deleting}
-        title="Delete Organization"
+        title="Delete Company / Society"
         message={`Are you sure you want to permanently remove "${deleteTarget?.name}"? Associated tenant access will stop functioning.`}
-        confirmLabel="Delete Organization"
+        confirmLabel="Delete Company / Society"
       />
     </DashboardLayout>
   );

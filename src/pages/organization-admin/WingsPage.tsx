@@ -41,6 +41,7 @@ export function WingsPage() {
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
   const orgId = userProfile?.organizationId || '';
+  const isOrgStaff = userProfile?.role === 'organization_staff';
   const canManage = userProfile?.role === 'organization_admin' || hasPermission('manage_properties');
   const canExport = userProfile?.role === 'organization_admin' || hasPermission('export_pdf');
 
@@ -65,8 +66,9 @@ export function WingsPage() {
     void loadData();
   }, [loadData]);
 
-  const activeTowers = demoPreview ? DEMO_TOWERS : towers;
-  const activeWings = demoPreview ? DEMO_WINGS : wings;
+  const effectiveDemo = !isOrgStaff && demoPreview;
+  const activeTowers = effectiveDemo ? DEMO_TOWERS : towers;
+  const activeWings = effectiveDemo ? DEMO_WINGS : wings;
 
   const filtered = useMemo(() => {
     return activeWings.filter((w) => {
@@ -190,8 +192,8 @@ export function WingsPage() {
       header: 'Actions',
       align: 'right',
       render: (w) =>
-        demoPreview || !canManage ? (
-          <span className="text-xs text-slate-400">{demoPreview ? 'Preview only' : 'View only'}</span>
+        effectiveDemo || !canManage ? (
+          <span className="text-xs text-slate-400">{effectiveDemo ? 'Preview only' : 'View only'}</span>
         ) : (
           <div className="inline-flex items-center gap-1">
             <button
@@ -247,12 +249,14 @@ export function WingsPage() {
       }
     >
       <div className="space-y-5">
-        <DemoDataBanner
-          isDemoMode={demoPreview}
-          onToggleDemo={() => setDemoPreview((p) => !p)}
-          liveCount={wings.length}
-          label="wings"
-        />
+        {!isOrgStaff && (
+          <DemoDataBanner
+            isDemoMode={demoPreview}
+            onToggleDemo={() => setDemoPreview((p) => !p)}
+            liveCount={wings.length}
+            label="wings"
+          />
+        )}
 
         <DataTable
           data={filtered}

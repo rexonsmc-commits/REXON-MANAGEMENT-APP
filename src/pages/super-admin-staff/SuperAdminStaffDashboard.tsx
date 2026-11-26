@@ -11,10 +11,10 @@ export function SuperAdminStaffDashboard() {
 
   const quickLinks = [
     {
-      label: 'Manage Organizations',
+      label: 'Manage Company / Society',
       path: '/super-admin-staff/organizations',
       perm: 'manage_organizations',
-      desc: 'View and update assigned tenant organizations.',
+      desc: 'View and update assigned company & society workspaces.',
     },
     {
       label: 'Subscription Plans',

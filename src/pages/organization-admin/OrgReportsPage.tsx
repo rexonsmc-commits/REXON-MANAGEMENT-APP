@@ -19,107 +19,142 @@ export function OrgReportsPage() {
 
   const orgId = userProfile?.organizationId || '';
   const orgName = organization?.name || userProfile?.organizationName || 'Organization';
-  const canExport = userProfile?.role === 'organization_admin' || hasPermission('export_pdf');
+  const isOrgAdmin = userProfile?.role === 'organization_admin';
+  const isOrgStaff = userProfile?.role === 'organization_staff';
+  const canExport = isOrgAdmin || hasPermission('export_pdf');
+
+  const hasStaffAccess = isOrgAdmin || hasPermission('view_staff');
+  const hasPropertyAccess = isOrgAdmin || hasPermission('view_properties');
+  const onlyGeneralReports =
+    !isOrgAdmin && hasPermission('view_reports') && !hasStaffAccess && !hasPropertyAccess;
+
+  const allowStaffReport = isOrgAdmin || hasStaffAccess || onlyGeneralReports;
+  const allowPropertyReports = isOrgAdmin || hasPropertyAccess || onlyGeneralReports;
 
   useEffect(() => {
     if (!orgId) return;
     Promise.all([
-      listOrganizationStaff(orgId).catch(() => []),
-      listTowers(orgId).catch(() => []),
-      listWings(orgId).catch(() => []),
-      listFlats(orgId).catch(() => []),
+      allowStaffReport ? listOrganizationStaff(orgId).catch(() => []) : Promise.resolve([]),
+      allowPropertyReports ? listTowers(orgId).catch(() => []) : Promise.resolve([]),
+      allowPropertyReports ? listWings(orgId).catch(() => []) : Promise.resolve([]),
+      allowPropertyReports ? listFlats(orgId).catch(() => []) : Promise.resolve([]),
     ]).then(([s, t, w, f]) => {
       setStaff(s);
       setTowers(t);
       setWings(w);
       setFlats(f);
-      if (s.length === 0 && t.length === 0 && f.length === 0) setDemoPreview(true);
+      if (!isOrgStaff && s.length === 0 && t.length === 0 && f.length === 0) {
+        setDemoPreview(true);
+      }
     });
-  }, [orgId]);
+  }, [orgId, allowStaffReport, allowPropertyReports, isOrgStaff]);
 
-  const activeStaff = demoPreview ? DEMO_ORG_STAFF : staff;
-  const activeTowers = demoPreview ? DEMO_TOWERS : towers;
-  const activeWings = demoPreview ? DEMO_WINGS : wings;
-  const activeFlats = demoPreview ? DEMO_FLATS : flats;
+  const effectiveDemo = !isOrgStaff && demoPreview;
+  const activeStaff = effectiveDemo ? DEMO_ORG_STAFF : staff;
+  const activeTowers = effectiveDemo ? DEMO_TOWERS : towers;
+  const activeWings = effectiveDemo ? DEMO_WINGS : wings;
+  const activeFlats = effectiveDemo ? DEMO_FLATS : flats;
 
   const reports = [
-    {
-      title: 'Staff Directory Report',
-      count: activeStaff.length,
-      desc: 'Employee IDs, departments, designations, roles, and statuses.',
-      onExport: () =>
-        exportTableToPdf({
-          title: 'Organization Staff Report',
-          organizationName: orgName,
-          generatedBy: userProfile?.email || 'Admin',
-          columns: ['Emp ID', 'Name', 'Email', 'Department', 'Role', 'Status'],
-          rows: activeStaff.map((s) => [
-            s.employeeId,
-            s.name,
-            s.email,
-            s.department,
-            s.role,
-            s.status,
-          ]),
-          filename: 'rexon-org-staff-report',
-        }),
-    },
-    {
-      title: 'Tower Directory Report',
-      count: activeTowers.length,
-      desc: 'Registered towers, tower numbers, and operational status.',
-      onExport: () =>
-        exportTableToPdf({
-          title: 'Organization Towers Report',
-          organizationName: orgName,
-          generatedBy: userProfile?.email || 'Admin',
-          columns: ['Tower No', 'Name', 'Description', 'Status'],
-          rows: activeTowers.map((t) => [t.towerNumber, t.name, t.description || '—', t.status]),
-          filename: 'rexon-org-towers-report',
-        }),
-    },
-    {
-      title: 'Wing Directory Report',
-      count: activeWings.length,
-      desc: 'Wings mapped to parent towers across the property.',
-      onExport: () =>
-        exportTableToPdf({
-          title: 'Organization Wings Report',
-          organizationName: orgName,
-          generatedBy: userProfile?.email || 'Admin',
-          columns: ['Wing', 'Parent Tower', 'Description', 'Status'],
-          rows: activeWings.map((w) => [
-            w.name,
-            w.towerName || w.towerId,
-            w.description || '—',
-            w.status,
-          ]),
-          filename: 'rexon-org-wings-report',
-        }),
-    },
-    {
-      title: 'Flat & Occupancy Report',
-      count: activeFlats.length,
-      desc: 'Complete flat register with owner, tenant, and occupancy types.',
-      onExport: () =>
-        exportTableToPdf({
-          title: 'Organization Flats & Occupancy Report',
-          organizationName: orgName,
-          generatedBy: userProfile?.email || 'Admin',
-          columns: ['Flat No', 'Tower', 'Wing', 'Type', 'Owner', 'Occupancy', 'Tenant', 'Status'],
-          rows: activeFlats.map((f) => [
-            f.flatNumber,
-            f.towerName || f.towerId,
-            f.wingName || f.wingId,
-            f.flatType,
-            f.ownerName,
-            f.occupancyType,
-            f.tenantName || '—',
-            f.status,
-          ]),
-          filename: 'rexon-org-flats-report',
-        }),
-    },
+    ...(allowStaffReport
+      ? [
+          {
+            title: 'Staff Directory Report',
+            count: activeStaff.length,
+            desc: 'Employee IDs, departments, designations, roles, and statuses.',
+            onExport: () =>
+              exportTableToPdf({
+                title: 'Organization Staff Report',
+                organizationName: orgName,
+                generatedBy: userProfile?.email || 'Admin',
+                columns: ['Emp ID', 'Name', 'Email', 'Department', 'Role', 'Status'],
+                rows: activeStaff.map((s) => [
+                  s.employeeId,
+                  s.name,
+                  s.email,
+                  s.department,
+                  s.role,
+                  s.status,
+                ]),
+                filename: 'rexon-org-staff-report',
+              }),
+          },
+        ]
+      : []),
+    ...(allowPropertyReports
+      ? [
+          {
+            title: 'Tower Directory Report',
+            count: activeTowers.length,
+            desc: 'Registered towers, tower numbers, and operational status.',
+            onExport: () =>
+              exportTableToPdf({
+                title: 'Organization Towers Report',
+                organizationName: orgName,
+                generatedBy: userProfile?.email || 'Admin',
+                columns: ['Tower No', 'Name', 'Description', 'Status'],
+                rows: activeTowers.map((t) => [
+                  t.towerNumber,
+                  t.name,
+                  t.description || '—',
+                  t.status,
+                ]),
+                filename: 'rexon-org-towers-report',
+              }),
+          },
+          {
+            title: 'Wing Directory Report',
+            count: activeWings.length,
+            desc: 'Wings mapped to parent towers across the property.',
+            onExport: () =>
+              exportTableToPdf({
+                title: 'Organization Wings Report',
+                organizationName: orgName,
+                generatedBy: userProfile?.email || 'Admin',
+                columns: ['Wing', 'Parent Tower', 'Description', 'Status'],
+                rows: activeWings.map((w) => [
+                  w.name,
+                  w.towerName || w.towerId,
+                  w.description || '—',
+                  w.status,
+                ]),
+                filename: 'rexon-org-wings-report',
+              }),
+          },
+          {
+            title: 'Flat & Occupancy Report',
+            count: activeFlats.length,
+            desc: 'Complete flat register with owner, tenant, and occupancy types.',
+            onExport: () =>
+              exportTableToPdf({
+                title: 'Organization Flats & Occupancy Report',
+                organizationName: orgName,
+                generatedBy: userProfile?.email || 'Admin',
+                columns: [
+                  'Flat No',
+                  'Tower',
+                  'Wing',
+                  'Type',
+                  'Owner',
+                  'Occupancy',
+                  'Tenant',
+                  'Status',
+                ],
+                rows: activeFlats.map((f) => [
+                  f.flatNumber,
+                  f.towerName || f.towerId,
+                  f.wingName || f.wingId,
+                  f.flatType,
+                  f.ownerName,
+                  f.occupancyType,
+                  f.tenantName || '—',
+                  f.status,
+                ]),
+                filename: 'rexon-org-flats-report',
+              }),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -128,12 +163,14 @@ export function OrgReportsPage() {
       subtitle="Export tenant-isolated staff and property directories to formatted PDF documents."
     >
       <div className="space-y-6">
-        <DemoDataBanner
-          isDemoMode={demoPreview}
-          onToggleDemo={() => setDemoPreview((p) => !p)}
-          liveCount={staff.length + towers.length + wings.length + flats.length}
-          label="organization records"
-        />
+        {!isOrgStaff && (
+          <DemoDataBanner
+            isDemoMode={demoPreview}
+            onToggleDemo={() => setDemoPreview((p) => !p)}
+            liveCount={staff.length + towers.length + wings.length + flats.length}
+            label="organization records"
+          />
+        )}
 
         <div className="grid gap-5 md:grid-cols-2">
           {reports.map((rep) => (

@@ -10,7 +10,7 @@ import {
 import { connectFunctionsEmulator, getFunctions } from 'firebase/functions';
 import appletConfig from '../../../firebase-applet-config.json';
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || appletConfig.apiKey,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || appletConfig.authDomain,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || appletConfig.projectId,

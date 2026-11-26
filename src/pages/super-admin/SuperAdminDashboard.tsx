@@ -41,15 +41,23 @@ export function SuperAdminDashboard() {
   useEffect(() => {
     let active = true;
     async function load() {
+      if (!userProfile) return;
       setLoading(true);
+      const isSA = userProfile.role === 'super_admin';
       try {
         const [orgs, saStaff, orgStaff, msgs] = await Promise.all([
-          listOrganizations().catch(() => []),
-          userProfile?.role === 'super_admin' || hasPermission('manage_staff')
+          isSA || hasPermission('manage_organizations') || hasPermission('view_dashboard')
+            ? listOrganizations().catch(() => [])
+            : Promise.resolve([]),
+          isSA || hasPermission('manage_staff')
             ? listSuperAdminStaff().catch(() => [])
             : Promise.resolve([]),
-          listAllOrganizationStaffGlobal().catch(() => []),
-          listContactMessages().catch(() => []),
+          isSA || hasPermission('manage_organizations') || hasPermission('manage_reports')
+            ? listAllOrganizationStaffGlobal().catch(() => [])
+            : Promise.resolve([]),
+          isSA || hasPermission('manage_reports') || hasPermission('view_dashboard')
+            ? listContactMessages().catch(() => [])
+            : Promise.resolve([]),
         ]);
         if (!active) return;
         setLiveOrgs(orgs);
@@ -117,7 +125,7 @@ export function SuperAdminDashboard() {
             className="inline-flex items-center gap-2 rounded-lg bg-[#1D4ED8] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#1E40AF] whitespace-nowrap"
           >
             <Plus className="h-4 w-4" />
-            <span>Manage Organizations</span>
+            <span>Manage Company / Society</span>
           </Link>
         )
       }

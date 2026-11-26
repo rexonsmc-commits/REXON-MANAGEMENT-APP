@@ -168,7 +168,8 @@ export async function updateSuperAdminStaff(
       createdAt: cur.createdAt,
       updatedAt: serverTimestamp(),
     };
-    if (cur.uid) payload.uid = cur.uid;
+    const nextUid = updates.uid ?? cur.uid;
+    if (nextUid) payload.uid = nextUid;
     if (nextPhone) payload.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
     if (loginId) payload.loginId = loginId;
 
@@ -413,7 +414,8 @@ export async function updateOrganizationStaff(
       createdAt: cur.createdAt,
       updatedAt: serverTimestamp(),
     };
-    if (cur.uid) payload.uid = cur.uid;
+    const nextUid = updates.uid ?? cur.uid;
+    if (nextUid) payload.uid = nextUid;
     if (nextPhone) payload.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
     if (loginId) payload.loginId = loginId;
 
@@ -421,14 +423,36 @@ export async function updateOrganizationStaff(
 
     const inviteSnap = await getDoc(doc(db, 'invitedAccounts', emailLower));
     if (inviteSnap.exists()) {
-      await updateDoc(doc(db, 'invitedAccounts', emailLower), {
+      const inviteUpdate: Record<string, unknown> = {
         displayName: payload.name,
+        employeeId: payload.employeeId,
         designation: payload.designation,
         department: payload.department,
         permissions: payload.permissions,
         status: payload.status,
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (nextUid) inviteUpdate.uid = nextUid;
+      if (nextPhone) inviteUpdate.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
+      if (loginId) inviteUpdate.loginId = loginId;
+      await updateDoc(doc(db, 'invitedAccounts', emailLower), inviteUpdate);
+    }
+
+    if (loginId) {
+      const loginPayload: Record<string, unknown> = {
+        loginId,
+        email: emailLower,
+        role: 'organization_staff',
+        organizationId: cur.organizationId,
+        accountStatus: payload.status,
+        createdBy: cur.createdBy || actor.uid,
+        createdAt: cur.createdAt || serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      if (nextUid) loginPayload.uid = nextUid;
+      await setDoc(doc(db, 'loginDirectory', loginId), loginPayload, { merge: true }).catch(
+        () => undefined
+      );
     }
 
     // Sync active/claimed user document scoped to this organization
@@ -461,16 +485,20 @@ export async function updateOrganizationStaff(
             }
           }
         }
-        await updateDoc(doc(db, 'users', uDoc.id), {
+        const userUpdate: Record<string, unknown> = {
           displayName: payload.name,
           fullName: payload.name,
+          employeeId: payload.employeeId,
           designation: payload.designation,
           department: payload.department,
           permissions: payload.permissions,
           status: payload.status,
           accountStatus: payload.status,
           updatedAt: serverTimestamp(),
-        });
+        };
+        if (nextPhone) userUpdate.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
+        if (loginId) userUpdate.loginId = loginId;
+        await updateDoc(doc(db, 'users', uDoc.id), userUpdate);
       }
     }
 
