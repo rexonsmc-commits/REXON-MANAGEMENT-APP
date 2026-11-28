@@ -15,6 +15,7 @@ import { PublicLayout } from '../../components/layout/PublicLayout';
 import { listPublicSubscriptionPlans } from '../../services/subscriptions/subscriptionService';
 import { BillingCycle, SubscriptionPlan } from '../../types';
 import { DEMO_TESTIMONIALS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
+import { formatINR } from '../../utils/subscriptionHelpers';
 
 const BILLING_LABELS: Record<BillingCycle, { label: string; suffix: string }> = {
   monthly: { label: 'Monthly', suffix: '/month' },
@@ -581,7 +582,7 @@ export function HomePage() {
 
                 <div className="mt-6 flex items-baseline gap-1 border-b border-slate-200 pb-6">
                   <span className="font-display text-3xl font-bold text-slate-900 tabular-nums">
-                    ${getPrice(plan)}
+                    {formatINR(getPrice(plan))}
                   </span>
                   <span className="text-xs text-slate-500">
                     {BILLING_LABELS[billingCycle].suffix}

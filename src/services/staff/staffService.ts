@@ -1,6 +1,7 @@
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -12,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { FIELD_LIMITS } from '../../config/permissions';
 import {
+  CustomPermission,
   OrganizationStaff,
   RoleTemplate,
   SuperAdminStaff,
@@ -47,6 +49,15 @@ export async function listSuperAdminStaff(): Promise<SuperAdminStaff[]> {
     return snap.docs.map((d) => d.data() as SuperAdminStaff);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'superAdminStaff');
+  }
+}
+
+export async function getSuperAdminStaffById(staffId: string): Promise<SuperAdminStaff | null> {
+  try {
+    const snap = await getDoc(doc(db, 'superAdminStaff', staffId));
+    return snap.exists() ? (snap.data() as SuperAdminStaff) : null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `superAdminStaff/${staffId}`);
   }
 }
 
@@ -169,9 +180,12 @@ export async function updateSuperAdminStaff(
       updatedAt: serverTimestamp(),
     };
     const nextUid = updates.uid ?? cur.uid;
+    const nextIsHidden = updates.isHidden ?? cur.isHidden;
     if (nextUid) payload.uid = nextUid;
     if (nextPhone) payload.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
     if (loginId) payload.loginId = loginId;
+    if (typeof nextIsHidden === 'boolean') payload.isHidden = nextIsHidden;
+    if (cur.hiddenAt && nextIsHidden) payload.hiddenAt = cur.hiddenAt;
 
     await updateDoc(doc(db, 'superAdminStaff', staffId), payload);
 
@@ -237,18 +251,121 @@ export async function updateSuperAdminStaff(
   }
 }
 
+export async function setSuperAdminStaffHiddenState(
+  staffId: string,
+  name: string,
+  isHidden: boolean,
+  actor: UserProfile
+): Promise<void> {
+  try {
+    const staffRef = doc(db, 'superAdminStaff', staffId);
+    const snap = await getDoc(staffRef);
+    if (!snap.exists()) throw new Error('Staff record not found');
+    const cur = snap.data() as SuperAdminStaff;
+    const emailLower = cur.email.trim().toLowerCase();
+
+    await updateDoc(staffRef, {
+      isHidden,
+      hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+      updatedAt: serverTimestamp(),
+    });
+
+    const inviteRef = doc(db, 'invitedAccounts', emailLower);
+    const inviteSnap = await getDoc(inviteRef).catch(() => null);
+    if (inviteSnap && inviteSnap.exists()) {
+      await updateDoc(inviteRef, {
+        isHidden,
+        hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+        updatedAt: serverTimestamp(),
+      }).catch(() => undefined);
+    }
+
+    const hiddenFields = {
+      isHidden,
+      hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+      updatedAt: serverTimestamp(),
+    };
+
+    const syncedUids = new Set<string>();
+    const userQ = query(collection(db, 'users'), where('email', '==', emailLower));
+    const userSnaps = await getDocs(userQ).catch(() => null);
+    if (userSnaps) {
+      for (const uDoc of userSnaps.docs) {
+        const uData = uDoc.data() as UserProfile;
+        if (uData.role === 'super_admin_staff') {
+          syncedUids.add(uDoc.id);
+          await updateDoc(doc(db, 'users', uDoc.id), hiddenFields).catch(() => undefined);
+        }
+      }
+    }
+    if (cur.uid && !syncedUids.has(cur.uid)) {
+      await updateDoc(doc(db, 'users', cur.uid), hiddenFields).catch(() => undefined);
+    }
+
+    await createAuditLog(actor, {
+      action: isHidden ? 'HIDE_SUPER_ADMIN_STAFF' : 'UNHIDE_SUPER_ADMIN_STAFF',
+      targetCollection: 'superAdminStaff',
+      targetId: staffId,
+      summary: isHidden
+        ? `Hid Super Admin Staff "${name}" (portal login blocked)`
+        : `Unhid Super Admin Staff "${name}" (portal login restored)`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `superAdminStaff/${staffId}`);
+  }
+}
+
 export async function deleteSuperAdminStaff(
   staffId: string,
   name: string,
   actor: UserProfile
 ): Promise<void> {
   try {
-    await deleteDoc(doc(db, 'superAdminStaff', staffId));
+    const staffRef = doc(db, 'superAdminStaff', staffId);
+    const snap = await getDoc(staffRef);
+    const cur = snap.exists() ? (snap.data() as SuperAdminStaff) : null;
+
+    if (cur) {
+      const emailLower = cur.email.trim().toLowerCase();
+      if (emailLower) {
+        const inviteSnap = await getDoc(doc(db, 'invitedAccounts', emailLower)).catch(() => null);
+        if (inviteSnap && inviteSnap.exists()) {
+          await deleteDoc(doc(db, 'invitedAccounts', emailLower)).catch(() => undefined);
+        }
+      }
+      const loginId = sanitizeLoginId(cur.loginId);
+      if (loginId) {
+        await deleteDoc(doc(db, 'loginDirectory', loginId)).catch(() => undefined);
+      }
+
+      const deletedUids = new Set<string>();
+      if (emailLower) {
+        const userQ = query(collection(db, 'users'), where('email', '==', emailLower));
+        const userSnaps = await getDocs(userQ).catch(() => null);
+        if (userSnaps) {
+          for (const uDoc of userSnaps.docs) {
+            const uData = uDoc.data() as UserProfile;
+            if (uData.role === 'super_admin_staff') {
+              deletedUids.add(uDoc.id);
+              await deleteDoc(doc(db, 'users', uDoc.id)).catch(() => undefined);
+            }
+          }
+        }
+      }
+      if (cur.uid && !deletedUids.has(cur.uid)) {
+        const uidSnap = await getDoc(doc(db, 'users', cur.uid)).catch(() => null);
+        if (uidSnap && uidSnap.exists() && (uidSnap.data() as UserProfile).role === 'super_admin_staff') {
+          await deleteDoc(doc(db, 'users', cur.uid)).catch(() => undefined);
+        }
+      }
+    }
+
+    await deleteDoc(staffRef);
     await createAuditLog(actor, {
       action: 'DELETE_SUPER_ADMIN_STAFF',
       targetCollection: 'superAdminStaff',
       targetId: staffId,
-      summary: `Removed Super Admin Staff "${name}"`,
+      summary: `Removed Super Admin Staff "${name}" and revoked portal access`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `superAdminStaff/${staffId}`);
@@ -269,6 +386,15 @@ export async function listOrganizationStaff(organizationId: string): Promise<Org
     return snap.docs.map((d) => d.data() as OrganizationStaff);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'organizationStaff');
+  }
+}
+
+export async function getOrganizationStaffById(staffId: string): Promise<OrganizationStaff | null> {
+  try {
+    const snap = await getDoc(doc(db, 'organizationStaff', staffId));
+    return snap.exists() ? (snap.data() as OrganizationStaff) : null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `organizationStaff/${staffId}`);
   }
 }
 
@@ -395,6 +521,9 @@ export async function updateOrganizationStaff(
     const snap = await getDoc(doc(db, 'organizationStaff', staffId));
     if (!snap.exists()) throw new Error('Staff member not found');
     const cur = snap.data() as OrganizationStaff;
+    if (actor.role !== 'super_admin' && cur.organizationId !== actor.organizationId) {
+      throw new Error('Security violation: Cross-organization staff update denied.');
+    }
     const emailLower = (updates.email ?? cur.email).trim().toLowerCase().slice(0, FIELD_LIMITS.EMAIL_MAX);
     const loginId = sanitizeLoginId(updates.loginId ?? cur.loginId);
     const nextPhone = updates.phone ?? cur.phone;
@@ -415,9 +544,12 @@ export async function updateOrganizationStaff(
       updatedAt: serverTimestamp(),
     };
     const nextUid = updates.uid ?? cur.uid;
+    const nextIsHidden = updates.isHidden ?? cur.isHidden;
     if (nextUid) payload.uid = nextUid;
     if (nextPhone) payload.phone = nextPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
     if (loginId) payload.loginId = loginId;
+    if (typeof nextIsHidden === 'boolean') payload.isHidden = nextIsHidden;
+    if (cur.hiddenAt && nextIsHidden) payload.hiddenAt = cur.hiddenAt;
 
     await updateDoc(doc(db, 'organizationStaff', staffId), payload);
 
@@ -532,6 +664,92 @@ export async function issuePasswordSetupInvite(email: string): Promise<string> {
   return `Password setup / reset email dispatched to ${emailLower}.`;
 }
 
+export async function setOrganizationStaffHiddenState(
+  staffId: string,
+  organizationId: string,
+  name: string,
+  isHidden: boolean,
+  actor: UserProfile
+): Promise<void> {
+  try {
+    const staffRef = doc(db, 'organizationStaff', staffId);
+    const snap = await getDoc(staffRef);
+    if (!snap.exists()) throw new Error('Staff member not found');
+    const cur = snap.data() as OrganizationStaff;
+    if (cur.organizationId !== organizationId) {
+      throw new Error('Security violation: Staff member does not belong to this organization.');
+    }
+    if (actor.role !== 'super_admin' && cur.organizationId !== actor.organizationId) {
+      throw new Error('Security violation: Cross-organization access denied.');
+    }
+
+    const emailLower = cur.email.trim().toLowerCase();
+    await updateDoc(staffRef, {
+      isHidden,
+      hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+      updatedAt: serverTimestamp(),
+    });
+
+    const inviteRef = doc(db, 'invitedAccounts', emailLower);
+    const inviteSnap = await getDoc(inviteRef).catch(() => null);
+    if (inviteSnap && inviteSnap.exists()) {
+      const inviteData = inviteSnap.data() as { organizationId?: string; role?: string };
+      if (inviteData.role === 'organization_staff' && inviteData.organizationId === cur.organizationId) {
+        await updateDoc(inviteRef, {
+          isHidden,
+          hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+          updatedAt: serverTimestamp(),
+        }).catch(() => undefined);
+      }
+    }
+
+    const hiddenFields = {
+      isHidden,
+      hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+      updatedAt: serverTimestamp(),
+    };
+
+    const syncedUids = new Set<string>();
+    const userQ = query(
+      collection(db, 'users'),
+      where('organizationId', '==', cur.organizationId)
+    );
+    const userSnaps = await getDocs(userQ).catch(() => null);
+    if (userSnaps) {
+      for (const uDoc of userSnaps.docs) {
+        const uData = uDoc.data() as UserProfile;
+        if (uData.email.toLowerCase() === emailLower && uData.role === 'organization_staff') {
+          syncedUids.add(uDoc.id);
+          await updateDoc(doc(db, 'users', uDoc.id), hiddenFields).catch(() => undefined);
+        }
+      }
+    }
+    if (cur.uid && !syncedUids.has(cur.uid)) {
+      const uidSnap = await getDoc(doc(db, 'users', cur.uid)).catch(() => null);
+      if (
+        uidSnap &&
+        uidSnap.exists() &&
+        (uidSnap.data() as UserProfile).role === 'organization_staff' &&
+        (uidSnap.data() as UserProfile).organizationId === cur.organizationId
+      ) {
+        await updateDoc(doc(db, 'users', cur.uid), hiddenFields).catch(() => undefined);
+      }
+    }
+
+    await createAuditLog(actor, {
+      organizationId: cur.organizationId,
+      action: isHidden ? 'HIDE_ORG_STAFF' : 'UNHIDE_ORG_STAFF',
+      targetCollection: 'organizationStaff',
+      targetId: staffId,
+      summary: isHidden
+        ? `Hid organization staff "${name}" (portal login blocked)`
+        : `Unhid organization staff "${name}" (portal login restored)`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `organizationStaff/${staffId}`);
+  }
+}
+
 export async function deleteOrganizationStaff(
   staffId: string,
   organizationId: string,
@@ -539,13 +757,72 @@ export async function deleteOrganizationStaff(
   actor: UserProfile
 ): Promise<void> {
   try {
-    await deleteDoc(doc(db, 'organizationStaff', staffId));
+    const staffRef = doc(db, 'organizationStaff', staffId);
+    const snap = await getDoc(staffRef);
+    const cur = snap.exists() ? (snap.data() as OrganizationStaff) : null;
+
+    if (cur) {
+      if (cur.organizationId !== organizationId) {
+        throw new Error('Security violation: Staff member does not belong to this organization.');
+      }
+      if (actor.role !== 'super_admin' && cur.organizationId !== actor.organizationId) {
+        throw new Error('Security violation: Cross-organization staff deletion denied.');
+      }
+
+      const emailLower = cur.email.trim().toLowerCase();
+      if (emailLower) {
+        const inviteSnap = await getDoc(doc(db, 'invitedAccounts', emailLower)).catch(() => null);
+        if (inviteSnap && inviteSnap.exists()) {
+          const inviteData = inviteSnap.data() as { organizationId?: string; role?: string };
+          if (
+            inviteData.role === 'organization_staff' &&
+            inviteData.organizationId === cur.organizationId
+          ) {
+            await deleteDoc(doc(db, 'invitedAccounts', emailLower)).catch(() => undefined);
+          }
+        }
+      }
+
+      const loginId = sanitizeLoginId(cur.loginId);
+      if (loginId) {
+        await deleteDoc(doc(db, 'loginDirectory', loginId)).catch(() => undefined);
+      }
+
+      const deletedUids = new Set<string>();
+      const userQ = query(
+        collection(db, 'users'),
+        where('organizationId', '==', cur.organizationId)
+      );
+      const userSnaps = await getDocs(userQ).catch(() => null);
+      if (userSnaps) {
+        for (const uDoc of userSnaps.docs) {
+          const uData = uDoc.data() as UserProfile;
+          if (uData.email.toLowerCase() === emailLower && uData.role === 'organization_staff') {
+            deletedUids.add(uDoc.id);
+            await deleteDoc(doc(db, 'users', uDoc.id)).catch(() => undefined);
+          }
+        }
+      }
+      if (cur.uid && !deletedUids.has(cur.uid)) {
+        const uidSnap = await getDoc(doc(db, 'users', cur.uid)).catch(() => null);
+        if (
+          uidSnap &&
+          uidSnap.exists() &&
+          (uidSnap.data() as UserProfile).role === 'organization_staff' &&
+          (uidSnap.data() as UserProfile).organizationId === cur.organizationId
+        ) {
+          await deleteDoc(doc(db, 'users', cur.uid)).catch(() => undefined);
+        }
+      }
+    }
+
+    await deleteDoc(staffRef);
     await createAuditLog(actor, {
       organizationId,
       action: 'DELETE_ORG_STAFF',
       targetCollection: 'organizationStaff',
       targetId: staffId,
-      summary: `Removed organization staff "${name}"`,
+      summary: `Removed organization staff "${name}" and revoked portal access`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `organizationStaff/${staffId}`);
@@ -616,3 +893,99 @@ export async function deleteRoleTemplate(
     handleFirestoreError(error, OperationType.DELETE, `roles/${roleId}`);
   }
 }
+
+// =========================================================================
+// CUSTOM PERMISSIONS (Dynamic Platform & Organization Scoped)
+// =========================================================================
+
+export async function listCustomPermissions(
+  scope: 'platform' | 'organization',
+  organizationId?: string
+): Promise<CustomPermission[]> {
+  try {
+    const q =
+      scope === 'platform'
+        ? query(collection(db, 'customPermissions'), where('scope', '==', 'platform'))
+        : query(
+            collection(db, 'customPermissions'),
+            where('scope', '==', 'organization'),
+            where('organizationId', '==', organizationId || '')
+          );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => d.data() as CustomPermission);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'customPermissions');
+  }
+}
+
+export async function createCustomPermission(
+  input: {
+    scope: 'platform' | 'organization';
+    organizationId?: string;
+    key: string;
+    label: string;
+    description?: string;
+    category: string;
+  },
+  actor: UserProfile
+): Promise<CustomPermission> {
+  const id = generateSafeId('perm');
+  const cleanKey = input.key
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]/g, '_')
+    .slice(0, 80);
+
+  const payload: Record<string, unknown> = {
+    id,
+    scope: input.scope,
+    key: cleanKey,
+    label: input.label.trim().slice(0, 100),
+    category: input.category.trim().slice(0, 60),
+    createdBy: actor.uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  if (input.scope === 'organization' && input.organizationId) {
+    payload.organizationId = input.organizationId;
+  }
+  if (input.description?.trim()) {
+    payload.description = input.description.trim().slice(0, 240);
+  }
+
+  try {
+    await setDoc(doc(db, 'customPermissions', id), payload);
+    await createAuditLog(actor, {
+      organizationId: input.scope === 'organization' ? input.organizationId : undefined,
+      action: 'CREATE_CUSTOM_PERMISSION',
+      targetCollection: 'customPermissions',
+      targetId: id,
+      summary: `Created custom permission "${String(payload.label)}" (${cleanKey})`,
+    });
+    return { ...(payload as unknown as CustomPermission), id };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `customPermissions/${id}`);
+  }
+}
+
+export async function deleteCustomPermission(
+  permId: string,
+  permLabel: string,
+  organizationId: string | undefined,
+  actor: UserProfile
+): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'customPermissions', permId));
+    await createAuditLog(actor, {
+      organizationId,
+      action: 'DELETE_CUSTOM_PERMISSION',
+      targetCollection: 'customPermissions',
+      targetId: permId,
+      summary: `Deleted custom permission "${permLabel}"`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `customPermissions/${permId}`);
+  }
+}
+

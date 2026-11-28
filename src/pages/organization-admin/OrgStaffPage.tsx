@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Download,
   Edit2,
@@ -8,9 +8,9 @@ import {
   KeyRound,
   Link2,
   Plus,
-  Power,
   RefreshCw,
   ShieldCheck,
+  ShieldPlus,
   Trash2,
   UserPlus,
   Users,
@@ -18,10 +18,12 @@ import {
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { ColumnDef, DataTable } from '../../components/common/DataTable';
 import { ConfirmDialog, Modal } from '../../components/common/Modal';
+import { CustomPermissionModal } from '../../components/common/CustomPermissionModal';
 import {
   generateStrongPassword,
   LoginCredentialsModal,
 } from '../../components/common/LoginCredentialsModal';
+import { PdfExportModal, PdfFilterValues } from '../../components/common/PdfExportModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import {
@@ -35,22 +37,28 @@ import {
   syncProvisionedAccountProfile,
 } from '../../services/auth/authService';
 import {
+  createCustomPermission,
   createOrganizationStaff,
   createRoleTemplate,
+  deleteCustomPermission,
   deleteOrganizationStaff,
   deleteRoleTemplate,
+  listCustomPermissions,
   listOrganizationStaff,
   listRoleTemplates,
+  setOrganizationStaffHiddenState,
   updateOrganizationStaff,
 } from '../../services/staff/staffService';
 import { exportTableToPdf } from '../../services/reports/pdfService';
 import {
   AccountStatus,
+  CustomPermission,
   OrganizationStaff,
   OrgStaffPermissionKey,
   RoleTemplate,
 } from '../../types';
 import { DEMO_ORG_STAFF } from '../../utils/demoData';
+import { formatDisplayDate, matchesDateFilter } from '../../utils/subscriptionHelpers';
 
 interface CredentialsModalState {
   open: boolean;
@@ -65,10 +73,12 @@ interface CredentialsModalState {
 export function OrgStaffPage() {
   const { userProfile, organization, hasPermission } = useAuth();
   const { showToast } = useToast();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [staffList, setStaffList] = useState<OrganizationStaff[]>([]);
   const [roleTemplates, setRoleTemplates] = useState<RoleTemplate[]>([]);
+  const [customPermissions, setCustomPermissions] = useState<CustomPermission[]>([]);
   const [loading, setLoading] = useState(true);
   const [demoPreview, setDemoPreview] = useState(false);
 
@@ -77,8 +87,11 @@ export function OrgStaffPage() {
   const [statusFilter, setStatusFilter] = useState('all');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [permModalOpen, setPermModalOpen] = useState(false);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [editing, setEditing] = useState<OrganizationStaff | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<OrganizationStaff | null>(null);
+  const [togglingHideId, setTogglingHideId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Staff form state
@@ -92,7 +105,9 @@ export function OrgStaffPage() {
   const [roleName, setRoleName] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [status, setStatus] = useState<AccountStatus>('active');
-  const [permissions, setPermissions] = useState<OrgStaffPermissionKey[]>(['view_dashboard']);
+  const [permissions, setPermissions] = useState<(OrgStaffPermissionKey | (string & {}))[]>([
+    'view_dashboard',
+  ]);
 
   // Firebase Auth Login ID & Password provisioning
   const [createAuthCredentials, setCreateAuthCredentials] = useState(true);
@@ -108,7 +123,9 @@ export function OrgStaffPage() {
   const [roleModalOpen, setRoleModalOpen] = useState(false);
   const [roleTplName, setRoleTplName] = useState('');
   const [roleTplDesc, setRoleTplDesc] = useState('');
-  const [roleTplPerms, setRoleTplPerms] = useState<OrgStaffPermissionKey[]>(['view_dashboard']);
+  const [roleTplPerms, setRoleTplPerms] = useState<(OrgStaffPermissionKey | (string & {}))[]>([
+    'view_dashboard',
+  ]);
   const [savingRole, setSavingRole] = useState(false);
 
   const orgId = userProfile?.organizationId || '';
@@ -135,12 +152,14 @@ export function OrgStaffPage() {
     }
     setLoading(true);
     try {
-      const [staff, roles] = await Promise.all([
+      const [staff, roles, customPerms] = await Promise.all([
         listOrganizationStaff(orgId),
         listRoleTemplates(orgId).catch(() => []),
+        listCustomPermissions('organization', orgId).catch(() => []),
       ]);
       setStaffList(staff);
       setRoleTemplates(roles);
+      setCustomPermissions(customPerms);
     } catch (err) {
       showToast('Failed to load staff', 'error', err instanceof Error ? err.message : undefined);
     } finally {
@@ -156,6 +175,25 @@ export function OrgStaffPage() {
   const effectiveDemo = !isOrgStaff && demoPreview;
   const activeData = effectiveDemo ? DEMO_ORG_STAFF : staffList;
 
+  const availablePermissions = useMemo(() => {
+    const builtIn = ORG_STAFF_PERMISSIONS.map((p) => ({
+      key: p.key as string,
+      label: p.label,
+      description: p.description,
+      isCustom: false,
+    }));
+    const existingKeys = new Set(builtIn.map((b) => b.key));
+    const extras = customPermissions
+      .filter((c) => !existingKeys.has(c.key))
+      .map((c) => ({
+        key: c.key,
+        label: c.label,
+        description: c.description || c.category,
+        isCustom: true,
+      }));
+    return [...builtIn, ...extras];
+  }, [customPermissions]);
+
   const departments = useMemo(() => {
     const set = new Set([...EXAMPLE_ORG_DEPARTMENTS, ...activeData.map((s) => s.department)]);
     return Array.from(set);
@@ -169,7 +207,12 @@ export function OrgStaffPage() {
         s.employeeId.toLowerCase().includes(search.toLowerCase()) ||
         s.email.toLowerCase().includes(search.toLowerCase());
       const matchesDept = deptFilter === 'all' || s.department === deptFilter;
-      const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
+      const matchesStatus =
+        statusFilter === 'all'
+          ? true
+          : statusFilter === 'hidden'
+            ? Boolean(s.isHidden)
+            : s.status === statusFilter;
       return matchesSearch && matchesDept && matchesStatus;
     });
   }, [activeData, search, deptFilter, statusFilter]);
@@ -230,13 +273,13 @@ export function OrgStaffPage() {
     setPermissions(tpl.permissions);
   };
 
-  const togglePerm = (key: OrgStaffPermissionKey) => {
+  const togglePerm = (key: string) => {
     setPermissions((prev) =>
       prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key]
     );
   };
 
-  const toggleRoleTplPerm = (key: OrgStaffPermissionKey) => {
+  const toggleRoleTplPerm = (key: string) => {
     setRoleTplPerms((prev) =>
       prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key]
     );
@@ -358,24 +401,51 @@ export function OrgStaffPage() {
     }
   };
 
-  const handleToggleStatus = async (s: OrganizationStaff) => {
-    if (!userProfile) return;
-    const next: AccountStatus = s.status === 'active' ? 'inactive' : 'active';
+  const handleViewDetails = (s: OrganizationStaff) => {
+    if (!isOrgAdmin || !orgId || s.organizationId !== orgId) return;
+    navigate(
+      `/organization-staff/dashboard?staffId=${encodeURIComponent(s.id)}&orgId=${encodeURIComponent(orgId)}`,
+      {
+        state: {
+          inspectStaff: s,
+          inspectStaffKind: 'organization_staff',
+          inspectOrgId: orgId,
+        },
+      }
+    );
+  };
+
+  const handleToggleHide = async (s: OrganizationStaff) => {
+    if (!userProfile || !isOrgAdmin || !orgId || s.organizationId !== orgId) return;
+    const nextHidden = !Boolean(s.isHidden);
+    setTogglingHideId(s.id);
     try {
-      await updateOrganizationStaff(s.id, { status: next }, userProfile);
-      showToast(`Staff marked ${next}`, 'success', s.name);
+      await setOrganizationStaffHiddenState(s.id, orgId, s.name, nextHidden, userProfile);
+      showToast(
+        nextHidden ? 'Staff portal hidden' : 'Staff portal restored',
+        'success',
+        nextHidden
+          ? `${s.name} is now blocked from logging into their portal.`
+          : `${s.name} can now log in again.`
+      );
       await loadData();
     } catch (err) {
-      showToast('Status update failed', 'error', err instanceof Error ? err.message : undefined);
+      showToast('Failed to update visibility', 'error', err instanceof Error ? err.message : undefined);
+    } finally {
+      setTogglingHideId(null);
     }
   };
 
   const handleDelete = async () => {
-    if (!deleteTarget || !userProfile) return;
+    if (!deleteTarget || !userProfile || !orgId) return;
+    if (deleteTarget.organizationId !== orgId) {
+      showToast('Access denied', 'error', 'Cannot delete staff outside this organization.');
+      return;
+    }
     setSaving(true);
     try {
       await deleteOrganizationStaff(deleteTarget.id, orgId, deleteTarget.name, userProfile);
-      showToast('Staff deleted', 'success', deleteTarget.name);
+      showToast('Staff deleted & access revoked', 'success', deleteTarget.name);
       setDeleteTarget(null);
       await loadData();
     } catch (err) {
@@ -423,13 +493,27 @@ export function OrgStaffPage() {
     }
   };
 
-  const handleExport = () => {
+  const filterStaffForPdf = (filters: PdfFilterValues) => {
+    return activeData.filter((s) => {
+      if (filters.dateFilter.mode !== 'all' && !matchesDateFilter(s.createdAt, filters.dateFilter)) {
+        return false;
+      }
+      if (filters.extraFilter !== 'all' && s.department !== filters.extraFilter) {
+        return false;
+      }
+      return true;
+    });
+  };
+
+  const handleExport = (filters: PdfFilterValues, filterSummary: string) => {
+    const rowsData = filterStaffForPdf(filters);
     exportTableToPdf({
       title: 'Organization Staff Directory',
+      subtitle: `${effectiveDemo ? 'Demo Preview' : 'Live Directory'}  |  ${filterSummary}`,
       organizationName: organization?.name || userProfile?.organizationName,
       generatedBy: userProfile?.email || 'Organization Admin',
-      columns: ['Emp ID', 'Name', 'Email', 'Department', 'Designation', 'Role', 'Status'],
-      rows: filtered.map((s) => [
+      columns: ['Emp ID', 'Name', 'Email', 'Department', 'Designation', 'Role', 'Status', 'Added'],
+      rows: rowsData.map((s) => [
         s.employeeId,
         s.name,
         s.email,
@@ -437,6 +521,7 @@ export function OrgStaffPage() {
         s.designation,
         s.role,
         s.status,
+        formatDisplayDate(s.createdAt),
       ]),
       filename: 'rexon-organization-staff',
     });
@@ -488,11 +573,20 @@ export function OrgStaffPage() {
     {
       key: 'status',
       header: 'Status',
-      render: (s) => <StatusLabel status={s.status} />,
+      render: (s) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusLabel status={s.status} />
+          {s.isHidden && (
+            <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+              Hidden
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       key: 'actions',
-      header: 'Login Access & Actions',
+      header: 'Actions & Portal Access',
       align: 'right',
       render: (s) =>
         effectiveDemo || !canManage ? (
@@ -500,42 +594,80 @@ export function OrgStaffPage() {
             {effectiveDemo ? 'Preview only' : 'View only'}
           </span>
         ) : (
-          <div className="inline-flex items-center gap-1.5">
+          <div className="ml-auto flex w-[160px] flex-col items-stretch gap-1.5">
+            {isOrgAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleViewDetails(s)}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap"
+                  title="Open this Staff Member's portal directly without password"
+                >
+                  <Eye className="h-3.5 w-3.5 shrink-0" />
+                  <span>View Details</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={togglingHideId === s.id}
+                  onClick={() => void handleToggleHide(s)}
+                  className={`inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap disabled:opacity-60 ${
+                    s.isHidden
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                      : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  }`}
+                  title={
+                    s.isHidden
+                      ? 'Unhide staff member so they can log in again'
+                      : 'Hide staff member and block portal login'
+                  }
+                >
+                  {s.isHidden ? (
+                    <>
+                      <Eye className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === s.id ? 'Updating...' : 'Unhide'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === s.id ? 'Updating...' : 'Hide'}</span>
+                    </>
+                  )}
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => openCredentialsModalForStaff(s)}
-              className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-100"
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-[#1D4ED8] hover:bg-blue-100 whitespace-nowrap"
               title="Login ID, Password & Dashboard Login Link"
             >
-              <KeyRound className="h-3.5 w-3.5" />
+              <KeyRound className="h-3.5 w-3.5 shrink-0" />
               <span>Login ID &amp; Pass</span>
             </button>
-            <button
-              type="button"
-              onClick={() => openEdit(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#1D4ED8]"
-              title="Edit staff"
-            >
-              <Edit2 className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleToggleStatus(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-amber-50 hover:text-amber-700"
-              title="Toggle Active/Inactive"
-            >
-              <Power className="h-4 w-4" />
-            </button>
-            {isOrgAdmin && (
+            <div className={isOrgAdmin ? 'grid grid-cols-2 gap-1.5' : 'flex'}>
               <button
                 type="button"
-                onClick={() => setDeleteTarget(s)}
-                className="rounded-md p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
-                title="Delete staff"
+                onClick={() => openEdit(s)}
+                className={`inline-flex items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-[#1D4ED8] whitespace-nowrap ${
+                  isOrgAdmin ? '' : 'w-full'
+                }`}
+                title="Edit staff"
               >
-                <Trash2 className="h-4 w-4" />
+                <Edit2 className="h-3.5 w-3.5 shrink-0" />
+                <span>Edit</span>
               </button>
-            )}
+              {isOrgAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(s)}
+                  className="inline-flex items-center justify-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap"
+                  title="Delete staff and revoke portal access"
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                  <span>Delete</span>
+                </button>
+              )}
+            </div>
           </div>
         ),
     },
@@ -548,15 +680,25 @@ export function OrgStaffPage() {
         organization?.name || userProfile?.organizationName || 'your organization'
       }.`}
       actions={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {activeTab === 'staff' && canExport && (
             <button
               type="button"
-              onClick={handleExport}
+              onClick={() => setPdfModalOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
             >
               <Download className="h-4 w-4" />
               <span>Export PDF</span>
+            </button>
+          )}
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => setPermModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-[#1D4ED8] hover:bg-blue-100 whitespace-nowrap"
+            >
+              <ShieldPlus className="h-4 w-4" />
+              <span>Add New Permission</span>
             </button>
           )}
           {canManage && activeTab === 'roles' && (
@@ -657,6 +799,7 @@ export function OrgStaffPage() {
                   options: [
                     { label: 'All Statuses', value: 'all' },
                     { label: 'Active', value: 'active' },
+                    { label: 'Hidden', value: 'hidden' },
                     { label: 'Pending', value: 'pending' },
                     { label: 'Inactive', value: 'inactive' },
                     { label: 'Suspended', value: 'suspended' },
@@ -730,7 +873,7 @@ export function OrgStaffPage() {
                   )}
                   <div className="mt-4 flex flex-wrap gap-1.5">
                     {r.permissions.map((p) => {
-                      const def = ORG_STAFF_PERMISSIONS.find((d) => d.key === p);
+                      const def = availablePermissions.find((d) => d.key === p);
                       return (
                         <span
                           key={p}
@@ -999,16 +1142,25 @@ export function OrgStaffPage() {
           </div>
 
           <div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="block text-xs font-semibold text-slate-700">
                 Module Permissions ({permissions.length} selected)
               </label>
-              <span className="text-[11px] text-slate-500">
-                Enforced both in sidebar navigation and Firestore rules
-              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPermModalOpen(true)}
+                  className="text-[11px] font-semibold text-[#1D4ED8] hover:underline"
+                >
+                  + Add New Permission
+                </button>
+                <span className="text-[11px] text-slate-500">
+                  Enforced both in sidebar navigation and Firestore rules
+                </span>
+              </div>
             </div>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {ORG_STAFF_PERMISSIONS.map((perm) => {
+              {availablePermissions.map((perm) => {
                 const checked = permissions.includes(perm.key);
                 return (
                   <label
@@ -1024,7 +1176,14 @@ export function OrgStaffPage() {
                       className="mt-0.5 rounded border-slate-300 text-[#1D4ED8]"
                     />
                     <div>
-                      <p className="font-semibold text-slate-900">{perm.label}</p>
+                      <p className="font-semibold text-slate-900">
+                        {perm.label}{' '}
+                        {perm.isCustom && (
+                          <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-[#1D4ED8]">
+                            Custom
+                          </span>
+                        )}
+                      </p>
                       <p className="text-slate-500">{perm.description}</p>
                     </div>
                   </label>
@@ -1083,11 +1242,20 @@ export function OrgStaffPage() {
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-700">
-              Permissions ({roleTplPerms.length} selected)
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-semibold text-slate-700">
+                Permissions ({roleTplPerms.length} selected)
+              </label>
+              <button
+                type="button"
+                onClick={() => setPermModalOpen(true)}
+                className="text-[11px] font-semibold text-[#1D4ED8] hover:underline"
+              >
+                + Add New Permission
+              </button>
+            </div>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {ORG_STAFF_PERMISSIONS.map((perm) => (
+              {availablePermissions.map((perm) => (
                 <label
                   key={perm.key}
                   className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2.5 text-xs ${
@@ -1103,7 +1271,14 @@ export function OrgStaffPage() {
                     className="mt-0.5 rounded border-slate-300 text-[#1D4ED8]"
                   />
                   <div>
-                    <p className="font-semibold text-slate-900">{perm.label}</p>
+                    <p className="font-semibold text-slate-900">
+                      {perm.label}{' '}
+                      {perm.isCustom && (
+                        <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-[#1D4ED8]">
+                          Custom
+                        </span>
+                      )}
+                    </p>
                     <p className="text-slate-500">{perm.description}</p>
                   </div>
                 </label>
@@ -1128,6 +1303,81 @@ export function OrgStaffPage() {
           </div>
         </form>
       </Modal>
+
+      <CustomPermissionModal
+        open={permModalOpen}
+        onClose={() => setPermModalOpen(false)}
+        scopeLabel={organization?.name || userProfile?.organizationName || 'your Company / Society'}
+        existingPermissions={customPermissions}
+        onCreate={async (input) => {
+          if (!userProfile || !orgId) {
+            throw new Error('Organization context is not loaded yet.');
+          }
+          try {
+            const created = await createCustomPermission(
+              {
+                scope: 'organization',
+                organizationId: orgId,
+                ...input,
+              },
+              userProfile
+            );
+            setCustomPermissions((prev) =>
+              prev.some((p) => p.key === created.key) ? prev : [...prev, created]
+            );
+            if (modalOpen) {
+              setPermissions((prev) =>
+                prev.includes(created.key) ? prev : [...prev, created.key]
+              );
+            }
+            if (roleModalOpen) {
+              setRoleTplPerms((prev) =>
+                prev.includes(created.key) ? prev : [...prev, created.key]
+              );
+            }
+            showToast(
+              'New permission added',
+              'success',
+              `${created.label} is now visible in Add Staff & Edit Staff.`
+            );
+          } catch (err) {
+            showToast(
+              'Failed to add permission',
+              'error',
+              err instanceof Error ? err.message : undefined
+            );
+            throw err;
+          }
+        }}
+        onDelete={async (perm) => {
+          if (!userProfile) return;
+          try {
+            await deleteCustomPermission(perm.id, perm.label, orgId, userProfile);
+            setCustomPermissions((prev) => prev.filter((p) => p.id !== perm.id));
+            setPermissions((prev) => prev.filter((p) => p !== perm.key));
+            showToast('Custom permission removed', 'success', perm.label);
+          } catch (err) {
+            showToast(
+              'Delete failed',
+              'error',
+              err instanceof Error ? err.message : undefined
+            );
+          }
+        }}
+      />
+
+      <PdfExportModal
+        open={pdfModalOpen}
+        onClose={() => setPdfModalOpen(false)}
+        title="Export Staff Directory PDF"
+        extraFilterLabel="Department"
+        extraFilterOptions={[
+          { label: 'All Departments', value: 'all' },
+          ...departments.map((d) => ({ label: d, value: d })),
+        ]}
+        getMatchCount={(f) => filterStaffForPdf(f).length}
+        onExport={handleExport}
+      />
 
       <LoginCredentialsModal
         open={credentialsModal.open}
@@ -1167,7 +1417,7 @@ export function OrgStaffPage() {
         onConfirm={handleDelete}
         loading={saving}
         title="Delete Organization Staff"
-        message={`Remove "${deleteTarget?.name}" (${deleteTarget?.employeeId})?`}
+        message={`Permanently delete "${deleteTarget?.name}" (${deleteTarget?.employeeId}) and revoke all login access, credentials, and permissions?`}
         confirmLabel="Delete Staff"
       />
     </DashboardLayout>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -10,6 +11,7 @@ import {
   generateStrongPassword,
   LoginCredentialsModal,
 } from '../../components/common/LoginCredentialsModal';
+import { PdfExportModal, PdfFilterValues } from '../../components/common/PdfExportModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import { useAuth } from '../../context/AuthContext';
@@ -22,6 +24,7 @@ import {
   createOrganization,
   deleteOrganization,
   listOrganizations,
+  setOrganizationHiddenState,
   updateOrganization,
 } from '../../services/organizations/organizationService';
 import {
@@ -31,6 +34,13 @@ import {
 import { exportTableToPdf } from '../../services/reports/pdfService';
 import { Organization, OrganizationType, SubscriptionPlan } from '../../types';
 import { DEMO_ORGANIZATIONS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
+import {
+  formatDisplayDate,
+  formatINR,
+  getSubscriptionExpiryInfo,
+  matchesDateFilter,
+  sortOrganizationsByExpiry,
+} from '../../utils/subscriptionHelpers';
 
 const orgSchema = z.object({
   name: z.string().min(2, 'Company / Society name required').max(160),
@@ -69,7 +79,14 @@ interface CredentialsModalState {
 }
 
 export function OrganizationsPage() {
-  const { userProfile, hasPermission } = useAuth();
+  const navigate = useNavigate();
+  const {
+    userProfile,
+    realUserProfile,
+    firebaseUser,
+    hasPermission,
+    isSuperAdmin,
+  } = useAuth();
   const { showToast } = useToast();
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -80,11 +97,14 @@ export function OrganizationsPage() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [expiryFilter, setExpiryFilter] = useState('all');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Organization | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [togglingHideId, setTogglingHideId] = useState<string | null>(null);
 
   // Firebase Auth credential provisioning on create
   const [createAuthCredentials, setCreateAuthCredentials] = useState(true);
@@ -116,10 +136,11 @@ export function OrganizationsPage() {
   });
 
   const loadData = useCallback(async () => {
+    if (!userProfile || !firebaseUser) return;
     setLoading(true);
     try {
       const canListAllPlans =
-        userProfile?.role === 'super_admin' ||
+        userProfile.role === 'super_admin' ||
         hasPermission('manage_plans') ||
         hasPermission('view_payments');
       const [orgsData, plansData] = await Promise.all([
@@ -135,13 +156,17 @@ export function OrganizationsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast, userProfile?.role, hasPermission]);
+  }, [showToast, userProfile, firebaseUser, hasPermission]);
 
   useEffect(() => {
+    if (!userProfile || !firebaseUser) return;
     void loadData();
-  }, [loadData]);
+  }, [loadData, userProfile, firebaseUser]);
 
-  const activeDataset = demoPreview ? DEMO_ORGANIZATIONS : organizations;
+  const activeDataset = useMemo(
+    () => sortOrganizationsByExpiry(demoPreview ? DEMO_ORGANIZATIONS : organizations),
+    [demoPreview, organizations]
+  );
 
   const filteredData = useMemo(() => {
     return activeDataset.filter((o) => {
@@ -151,10 +176,17 @@ export function OrganizationsPage() {
         o.contactPerson.toLowerCase().includes(search.toLowerCase()) ||
         o.adminLoginEmail.toLowerCase().includes(search.toLowerCase());
       const matchesType = typeFilter === 'all' || o.type === typeFilter;
-      const matchesStatus = statusFilter === 'all' || o.accountStatus === statusFilter;
-      return matchesSearch && matchesType && matchesStatus;
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'hidden' ? Boolean(o.isHidden) : o.accountStatus === statusFilter);
+      const info = getSubscriptionExpiryInfo(o);
+      const matchesExpiry =
+        expiryFilter === 'all' ||
+        (expiryFilter === 'attention' && info.isAlertRequired) ||
+        (expiryFilter === 'healthy' && !info.isAlertRequired);
+      return matchesSearch && matchesType && matchesStatus && matchesExpiry;
     });
-  }, [activeDataset, search, typeFilter, statusFilter]);
+  }, [activeDataset, search, typeFilter, statusFilter, expiryFilter]);
 
   const openCreateModal = () => {
     setEditingOrg(null);
@@ -314,7 +346,11 @@ export function OrganizationsPage() {
     if (!deleteTarget || !userProfile) return;
     setDeleting(true);
     try {
-      await deleteOrganization(deleteTarget.id, deleteTarget.name, userProfile);
+      await deleteOrganization(
+        deleteTarget.id,
+        deleteTarget.name,
+        realUserProfile || userProfile
+      );
       showToast('Company / Society deleted', 'success', `${deleteTarget.name} removed.`);
       setDeleteTarget(null);
       await loadData();
@@ -325,20 +361,80 @@ export function OrganizationsPage() {
     }
   };
 
-  const handleExportPdf = () => {
+  const handleViewDetails = (org: Organization) => {
+    if (!isSuperAdmin()) return;
+    navigate(`/organization-admin/dashboard?orgId=${encodeURIComponent(org.id)}`, {
+      state: { inspectOrg: org },
+    });
+  };
+
+  const handleToggleHide = async (org: Organization) => {
+    if (!isSuperAdmin() || !userProfile) return;
+    const nextHidden = !org.isHidden;
+    setTogglingHideId(org.id);
+    try {
+      await setOrganizationHiddenState(
+        org.id,
+        org.name,
+        nextHidden,
+        realUserProfile || userProfile
+      );
+      showToast(
+        nextHidden ? 'Company / Society hidden' : 'Company / Society unhidden',
+        'success',
+        nextHidden
+          ? `${org.name} is hidden. Company / Society users will see a contact Super Admin notice.`
+          : `${org.name} portal access restored for company / society users.`
+      );
+      await loadData();
+    } catch (err) {
+      showToast('Status update failed', 'error', err instanceof Error ? err.message : undefined);
+    } finally {
+      setTogglingHideId(null);
+    }
+  };
+
+  const filterOrgsForPdf = (filters: PdfFilterValues) => {
+    return activeDataset.filter((o) => {
+      const dateRef = o.subscriptionStartDate || o.createdAt || o.subscriptionExpiryDate;
+      if (filters.dateFilter.mode !== 'all' && !matchesDateFilter(dateRef, filters.dateFilter)) {
+        return false;
+      }
+      if (filters.companyId !== 'all' && o.id !== filters.companyId) {
+        return false;
+      }
+      if (filters.extraFilter !== 'all' && o.subscriptionStatus !== filters.extraFilter) {
+        return false;
+      }
+      return true;
+    });
+  };
+
+  const handleExportPdf = (filters: PdfFilterValues, filterSummary: string) => {
+    const rowsData = filterOrgsForPdf(filters);
     exportTableToPdf({
       title: 'Registered Companies & Societies Report',
-      subtitle: demoPreview ? 'Source: Visual Preview Demo Data' : 'Source: Live Firestore Database',
+      subtitle: `${demoPreview ? 'Demo Preview' : 'Live Firestore'}  |  ${filterSummary}`,
       generatedBy: userProfile?.email || 'Super Admin',
-      columns: ['Company / Society', 'Type', 'Contact Person', 'Admin Login', 'Plan', 'Sub Status', 'Account'],
-      rows: filteredData.map((o) => [
+      columns: [
+        'Company / Society',
+        'Type',
+        'Contact Person',
+        'Admin Login',
+        'Plan',
+        'Expiry',
+        'Sub Status',
+        'Created',
+      ],
+      rows: rowsData.map((o) => [
         o.name,
         o.type,
         o.contactPerson,
         o.adminLoginEmail,
         o.subscriptionPlanName || 'Unassigned',
+        o.subscriptionExpiryDate || '—',
         o.subscriptionStatus,
-        o.accountStatus,
+        formatDisplayDate(o.createdAt || o.subscriptionStartDate),
       ]),
       filename: 'rexon-companies-societies-report',
     });
@@ -377,14 +473,27 @@ export function OrganizationsPage() {
     {
       key: 'plan',
       header: 'Plan & Expiry',
-      render: (o) => (
-        <div>
-          <p className="font-medium text-slate-800">{o.subscriptionPlanName || '—'}</p>
-          <p className="text-xs text-slate-500 tabular-nums">
-            {o.subscriptionExpiryDate || 'No expiry set'}
-          </p>
-        </div>
-      ),
+      render: (o) => {
+        const info = getSubscriptionExpiryInfo(o);
+        return (
+          <div>
+            <p className="font-medium text-slate-800">{o.subscriptionPlanName || '—'}</p>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs tabular-nums">
+              <span className="text-slate-500">{o.subscriptionExpiryDate || 'No expiry set'}</span>
+              {info.urgency === 'expired' && (
+                <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+                  {info.label}
+                </span>
+              )}
+              {info.urgency === 'expiring_soon' && (
+                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                  {info.label}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      },
     },
     {
       key: 'subStatus',
@@ -394,47 +503,106 @@ export function OrganizationsPage() {
     {
       key: 'accountStatus',
       header: 'Status',
-      render: (o) => <StatusLabel status={o.accountStatus} />,
+      render: (o) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusLabel status={o.accountStatus} />
+          {o.isHidden && (
+            <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+              Hidden
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       key: 'actions',
-      header: 'Login Access & Actions',
+      header: 'Actions & Portal Access',
       align: 'right',
       render: (o) =>
         demoPreview ? (
           <span className="text-xs text-slate-400">Preview only</span>
         ) : (
-          <div className="inline-flex items-center gap-1.5">
-            {canEdit && (
+          <div className="ml-auto flex w-[160px] flex-col items-stretch gap-1.5">
+            {isSuperAdmin() && (
               <>
                 <button
                   type="button"
-                  onClick={() => openCredentialsModalForOrg(o)}
-                  className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-100"
-                  title="Login ID, Password & Dashboard Login Link"
+                  onClick={() => handleViewDetails(o)}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap"
+                  title="Open full Company / Society Admin portal directly without password"
                 >
-                  <KeyRound className="h-3.5 w-3.5" />
-                  <span>Login ID &amp; Pass</span>
+                  <Eye className="h-3.5 w-3.5 shrink-0" />
+                  <span>View Details</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => openEditModal(o)}
-                  className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#1D4ED8]"
-                  title="Edit company / society"
+                  disabled={togglingHideId === o.id}
+                  onClick={() => void handleToggleHide(o)}
+                  className={`inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap disabled:opacity-60 ${
+                    o.isHidden
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                      : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  }`}
+                  title={
+                    o.isHidden
+                      ? 'Unhide Company / Society so users can log in again'
+                      : 'Hide Company / Society and block tenant user logins'
+                  }
                 >
-                  <Edit2 className="h-4 w-4" />
+                  {o.isHidden ? (
+                    <>
+                      <Eye className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === o.id ? 'Updating...' : 'Unhide'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === o.id ? 'Updating...' : 'Hide'}</span>
+                    </>
+                  )}
                 </button>
               </>
             )}
-            {canDelete && (
+            {canEdit && (
               <button
                 type="button"
-                onClick={() => setDeleteTarget(o)}
-                className="rounded-md p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
-                title="Delete company / society"
+                onClick={() => openCredentialsModalForOrg(o)}
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-[#1D4ED8] hover:bg-blue-100 whitespace-nowrap"
+                title="Login ID, Password & Dashboard Login Link"
               >
-                <Trash2 className="h-4 w-4" />
+                <KeyRound className="h-3.5 w-3.5 shrink-0" />
+                <span>Login ID &amp; Pass</span>
               </button>
+            )}
+            {(canEdit || canDelete) && (
+              <div className="grid grid-cols-2 gap-1.5">
+                {canEdit ? (
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(o)}
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-[#1D4ED8] whitespace-nowrap"
+                    title="Edit company / society"
+                  >
+                    <Edit2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>Edit</span>
+                  </button>
+                ) : (
+                  <span />
+                )}
+                {canDelete ? (
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(o)}
+                    className="inline-flex items-center justify-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap"
+                    title="Delete company / society and associated tenant access"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>Delete</span>
+                  </button>
+                ) : (
+                  <span />
+                )}
+              </div>
             )}
           </div>
         ),
@@ -450,7 +618,7 @@ export function OrganizationsPage() {
           {canExport && (
             <button
               type="button"
-              onClick={handleExportPdf}
+              onClick={() => setPdfModalOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
             >
               <Download className="h-4 w-4" />
@@ -504,6 +672,17 @@ export function OrganizationsPage() {
               ],
             },
             {
+              key: 'expiry',
+              label: 'Subscription Priority',
+              value: expiryFilter,
+              onChange: setExpiryFilter,
+              options: [
+                { label: 'All Subscriptions (Expiring First)', value: 'all' },
+                { label: 'Expiring Soon / Expired / Pending', value: 'attention' },
+                { label: 'Healthy Active (>30d)', value: 'healthy' },
+              ],
+            },
+            {
               key: 'status',
               label: 'Filter by status',
               value: statusFilter,
@@ -511,6 +690,7 @@ export function OrganizationsPage() {
               options: [
                 { label: 'All Statuses', value: 'all' },
                 { label: 'Active', value: 'active' },
+                { label: 'Hidden', value: 'hidden' },
                 { label: 'Pending', value: 'pending' },
                 { label: 'Inactive', value: 'inactive' },
                 { label: 'Suspended', value: 'suspended' },
@@ -739,7 +919,7 @@ export function OrganizationsPage() {
                 <option value="">Select plan</option>
                 {plans.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} (${p.yearlyPrice}/yr)
+                    {p.name} ({formatINR(p.yearlyPrice)}/yr)
                   </option>
                 ))}
               </select>
@@ -843,6 +1023,23 @@ export function OrganizationsPage() {
             await loadData();
           }
         }}
+      />
+
+      <PdfExportModal
+        open={pdfModalOpen}
+        onClose={() => setPdfModalOpen(false)}
+        title="Export Companies & Societies PDF"
+        companies={activeDataset.map((o) => ({ id: o.id, name: o.name }))}
+        extraFilterLabel="Subscription Status"
+        extraFilterOptions={[
+          { label: 'All Subscription Statuses', value: 'all' },
+          { label: 'Active', value: 'Active' },
+          { label: 'Pending', value: 'Pending' },
+          { label: 'Expired', value: 'Expired' },
+          { label: 'Suspended', value: 'Suspended' },
+        ]}
+        getMatchCount={(f) => filterOrgsForPdf(f).length}
+        onExport={handleExportPdf}
       />
 
       <ConfirmDialog

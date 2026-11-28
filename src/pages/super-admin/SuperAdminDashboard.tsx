@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Building2,
   CheckCircle2,
   Clock,
   CreditCard,
+  Eye,
   FileBarChart,
   Plus,
   Users,
@@ -29,9 +30,14 @@ import { listAllOrganizationStaffGlobal, listSuperAdminStaff } from '../../servi
 import { listContactMessages } from '../../services/subscriptions/subscriptionService';
 import { ContactMessage, Organization } from '../../types';
 import { DEMO_ORGANIZATIONS, DEMO_SUPER_ADMIN_STAFF } from '../../utils/demoData';
+import {
+  getSubscriptionExpiryInfo,
+  sortOrganizationsByExpiry,
+} from '../../utils/subscriptionHelpers';
 
 export function SuperAdminDashboard() {
-  const { userProfile, hasPermission } = useAuth();
+  const navigate = useNavigate();
+  const { userProfile, hasPermission, isSuperAdmin } = useAuth();
   const [liveOrgs, setLiveOrgs] = useState<Organization[]>([]);
   const [liveStaffCount, setLiveStaffCount] = useState(0);
   const [messages, setMessages] = useState<ContactMessage[]>([]);
@@ -76,7 +82,10 @@ export function SuperAdminDashboard() {
     };
   }, [userProfile, hasPermission]);
 
-  const orgs = demoPreview ? DEMO_ORGANIZATIONS : liveOrgs;
+  const orgs = useMemo(
+    () => sortOrganizationsByExpiry(demoPreview ? DEMO_ORGANIZATIONS : liveOrgs),
+    [demoPreview, liveOrgs]
+  );
   const staffCount = demoPreview ? DEMO_SUPER_ADMIN_STAFF.length + 14 : liveStaffCount;
 
   const metrics = useMemo(() => {
@@ -257,24 +266,72 @@ export function SuperAdminDashboard() {
                     <th className="px-4 py-3">Type</th>
                     <th className="px-4 py-3">Subscription</th>
                     <th className="px-4 py-3">Account</th>
+                    {isSuperAdmin() && <th className="px-4 py-3 text-right">Portal</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {orgs.slice(0, 5).map((org) => (
-                    <tr key={org.id} className="hover:bg-slate-50/70">
-                      <td className="px-4 py-3 font-medium text-slate-900">{org.name}</td>
-                      <td className="px-4 py-3 text-slate-600">{org.type}</td>
-                      <td className="px-4 py-3">
-                        <StatusLabel status={org.subscriptionStatus} />
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusLabel status={org.accountStatus} />
-                      </td>
-                    </tr>
-                  ))}
+                  {orgs.slice(0, 5).map((org) => {
+                    const info = getSubscriptionExpiryInfo(org);
+                    return (
+                      <tr key={org.id} className="hover:bg-slate-50/70">
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-slate-900">{org.name}</p>
+                          {(info.urgency === 'expired' || info.urgency === 'expiring_soon') && (
+                            <span
+                              className={`mt-0.5 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                info.urgency === 'expired'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {info.label}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">{org.type}</td>
+                        <td className="px-4 py-3">
+                          <StatusLabel status={org.subscriptionStatus} />
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <StatusLabel status={org.accountStatus} />
+                            {org.isHidden && (
+                              <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+                                Hidden
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        {isSuperAdmin() && (
+                          <td className="px-4 py-3 text-right">
+                            {!demoPreview ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  navigate(
+                                    `/organization-admin/dashboard?orgId=${encodeURIComponent(org.id)}`,
+                                    { state: { inspectOrg: org } }
+                                  )
+                                }
+                                className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap"
+                              >
+                                <Eye className="h-3 w-3" />
+                                <span>View Details</span>
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">Demo</span>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
                   {orgs.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="px-4 py-8 text-center text-sm text-slate-500">
+                      <td
+                        colSpan={isSuperAdmin() ? 5 : 4}
+                        className="px-4 py-8 text-center text-sm text-slate-500"
+                      >
                         No live organizations provisioned yet.
                       </td>
                     </tr>

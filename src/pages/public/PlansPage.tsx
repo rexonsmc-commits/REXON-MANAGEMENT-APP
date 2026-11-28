@@ -5,6 +5,7 @@ import { PublicLayout } from '../../components/layout/PublicLayout';
 import { listPublicSubscriptionPlans } from '../../services/subscriptions/subscriptionService';
 import { BillingCycle, SubscriptionPlan } from '../../types';
 import { SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
+import { formatINR } from '../../utils/subscriptionHelpers';
 
 const CYCLES: { key: BillingCycle; label: string; suffix: string }[] = [
   { key: 'monthly', label: 'Monthly', suffix: '/month' },
@@ -118,7 +119,7 @@ export function PlansPage() {
                 <div className="mt-6 border-b border-slate-200 pb-6">
                   <div className="flex items-baseline gap-1">
                     <span className="font-display text-4xl font-bold text-slate-900 tabular-nums">
-                      ${priceFor(plan)}
+                      {formatINR(priceFor(plan))}
                     </span>
                     <span className="text-sm text-slate-500">
                       {CYCLES.find((c) => c.key === cycle)?.suffix}
@@ -176,13 +177,13 @@ export function PlansPage() {
                   {plans.map((p) => (
                     <tr key={p.id}>
                       <td className="px-6 py-3.5 font-semibold text-slate-900">{p.name}</td>
-                      <td className="px-6 py-3.5 text-right text-slate-700">${p.monthlyPrice}</td>
-                      <td className="px-6 py-3.5 text-right text-slate-700">${p.quarterlyPrice}</td>
+                      <td className="px-6 py-3.5 text-right text-slate-700">{formatINR(p.monthlyPrice)}</td>
+                      <td className="px-6 py-3.5 text-right text-slate-700">{formatINR(p.quarterlyPrice)}</td>
                       <td className="px-6 py-3.5 text-right text-slate-700">
-                        ${p.halfYearlyPrice}
+                        {formatINR(p.halfYearlyPrice)}
                       </td>
                       <td className="px-6 py-3.5 text-right font-semibold text-slate-900">
-                        ${p.yearlyPrice}
+                        {formatINR(p.yearlyPrice)}
                       </td>
                       <td className="px-6 py-3.5 text-right text-slate-700">{p.maxStaff}</td>
                       <td className="px-6 py-3.5 text-right text-slate-700">{p.maxSites}</td>

@@ -26,7 +26,7 @@ export function SuperAdminSettingsPage() {
   return (
     <DashboardLayout
       title="Platform Governance & Settings"
-      subtitle="Firebase integration status, unique Super Admin invariant verification, and immutable audit logs."
+      subtitle="Firebase integration status, unique Super Admin invariant, account provisioning policy, and immutable audit logs."
     >
       <div className="space-y-6">
         <div className="grid gap-6 md:grid-cols-3">

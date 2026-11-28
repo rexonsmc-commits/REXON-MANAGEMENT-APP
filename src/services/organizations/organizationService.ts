@@ -1,6 +1,7 @@
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -224,6 +225,12 @@ export async function updateOrganization(
     if (expiryDate) payload.subscriptionExpiryDate = expiryDate;
     if (adminLoginId) payload.adminLoginId = adminLoginId;
     if (adminUid) payload.adminUid = adminUid;
+    if (typeof (updates.isHidden ?? current.isHidden) === 'boolean') {
+      payload.isHidden = updates.isHidden ?? current.isHidden;
+    }
+    if (current.hiddenAt && payload.isHidden) {
+      payload.hiddenAt = current.hiddenAt;
+    }
 
     await updateDoc(doc(db, 'organizations', orgId), payload);
 
@@ -280,15 +287,109 @@ export async function updateOrganizationProfileByTenant(
   }
 }
 
-export async function deleteOrganization(orgId: string, orgName: string, actor: UserProfile): Promise<void> {
+export async function setOrganizationHiddenState(
+  orgId: string,
+  orgName: string,
+  isHidden: boolean,
+  actor: UserProfile
+): Promise<void> {
   try {
+    await updateDoc(doc(db, 'organizations', orgId), {
+      isHidden,
+      hiddenAt: isHidden ? serverTimestamp() : deleteField(),
+      updatedAt: serverTimestamp(),
+    });
+    await createAuditLog(actor, {
+      organizationId: orgId,
+      action: isHidden ? 'HIDE_ORGANIZATION' : 'UNHIDE_ORGANIZATION',
+      targetCollection: 'organizations',
+      targetId: orgId,
+      summary: `${isHidden ? 'Hidden' : 'Unhidden'} company/society "${orgName}"`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `organizations/${orgId}`);
+  }
+}
+
+export async function deleteOrganization(
+  orgId: string,
+  orgName: string,
+  actor: UserProfile
+): Promise<void> {
+  try {
+    const orgSnap = await getDoc(doc(db, 'organizations', orgId)).catch(() => null);
+    const orgData = orgSnap?.exists() ? (orgSnap.data() as Organization) : null;
+
+    // Collect known login IDs & emails to revoke login access cleanly
+    const loginIdsToDelete = new Set<string>();
+    if (orgData?.adminLoginId) loginIdsToDelete.add(orgData.adminLoginId.toLowerCase());
+
+    const staffSnap = await getDocs(
+      query(collection(db, 'organizationStaff'), where('organizationId', '==', orgId))
+    ).catch(() => null);
+
+    if (staffSnap) {
+      for (const d of staffSnap.docs) {
+        const st = d.data() as { loginId?: string };
+        if (st.loginId) loginIdsToDelete.add(st.loginId.toLowerCase());
+        await deleteDoc(d.ref).catch(() => undefined);
+      }
+    }
+
+    const scopedCollections = ['towers', 'wings', 'flats', 'roles', 'invitedAccounts'];
+    for (const colName of scopedCollections) {
+      const snap = await getDocs(
+        query(collection(db, colName), where('organizationId', '==', orgId))
+      ).catch(() => null);
+      if (snap) {
+        for (const d of snap.docs) {
+          await deleteDoc(d.ref).catch(() => undefined);
+        }
+      }
+    }
+
+    const customPermSnap = await getDocs(
+      query(
+        collection(db, 'customPermissions'),
+        where('scope', '==', 'organization'),
+        where('organizationId', '==', orgId)
+      )
+    ).catch(() => null);
+    if (customPermSnap) {
+      for (const d of customPermSnap.docs) {
+        await deleteDoc(d.ref).catch(() => undefined);
+      }
+    }
+
+    const usersSnap = await getDocs(
+      query(collection(db, 'users'), where('organizationId', '==', orgId))
+    ).catch(() => null);
+    if (usersSnap) {
+      for (const d of usersSnap.docs) {
+        const u = d.data() as { role?: string };
+        if (u.role !== 'super_admin') {
+          await deleteDoc(d.ref).catch(() => undefined);
+        }
+      }
+    }
+
+    for (const loginKey of loginIdsToDelete) {
+      await deleteDoc(doc(db, 'loginDirectory', loginKey)).catch(() => undefined);
+    }
+
+    if (orgData?.adminLoginEmail) {
+      await deleteDoc(doc(db, 'invitedAccounts', orgData.adminLoginEmail.toLowerCase())).catch(
+        () => undefined
+      );
+    }
+
     await deleteDoc(doc(db, 'organizations', orgId));
     await createAuditLog(actor, {
       organizationId: orgId,
       action: 'DELETE_ORGANIZATION',
       targetCollection: 'organizations',
       targetId: orgId,
-      summary: `Deleted organization "${orgName}"`,
+      summary: `Deleted company/society "${orgName}" and revoked tenant access`,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `organizations/${orgId}`);

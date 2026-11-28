@@ -1,11 +1,35 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, ShieldCheck } from 'lucide-react';
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { SUPER_ADMIN_STAFF_PERMISSIONS } from '../../config/permissions';
 import { useAuth } from '../../context/AuthContext';
+import { listCustomPermissions } from '../../services/staff/staffService';
+import { CustomPermission } from '../../types';
 
 export function SuperAdminStaffDashboard() {
   const { userProfile, hasPermission } = useAuth();
+  const [customPerms, setCustomPerms] = useState<CustomPermission[]>([]);
+
+  useEffect(() => {
+    if (!userProfile) return;
+    listCustomPermissions('platform')
+      .then(setCustomPerms)
+      .catch(() => []);
+  }, [userProfile]);
+
+  const mergedPermissions = useMemo(() => {
+    const base = SUPER_ADMIN_STAFF_PERMISSIONS.map((p) => ({
+      key: p.key as string,
+      label: p.label,
+      isCustom: false,
+    }));
+    const keys = new Set(base.map((b) => b.key));
+    const customGranted = customPerms
+      .filter((c) => !keys.has(c.key) && hasPermission(c.key))
+      .map((c) => ({ key: c.key, label: c.label, isCustom: true }));
+    return [...base, ...customGranted];
+  }, [customPerms, hasPermission]);
 
   if (!userProfile) return null;
 
@@ -55,7 +79,7 @@ export function SuperAdminStaffDashboard() {
           </p>
 
           <div className="mt-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-            {SUPER_ADMIN_STAFF_PERMISSIONS.map((perm) => {
+            {mergedPermissions.map((perm) => {
               const granted = hasPermission(perm.key);
               return (
                 <div
@@ -67,7 +91,14 @@ export function SuperAdminStaffDashboard() {
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold">{perm.label}</span>
+                    <span className="font-semibold">
+                      {perm.label}{' '}
+                      {perm.isCustom && (
+                        <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-[#1D4ED8]">
+                          Custom
+                        </span>
+                      )}
+                    </span>
                     <span>{granted ? 'Enabled' : 'Restricted'}</span>
                   </div>
                 </div>

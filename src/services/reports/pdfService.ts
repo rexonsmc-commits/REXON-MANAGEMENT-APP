@@ -1,5 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { BillingContactConfig, Organization, PaymentRecord } from '../../types';
+import { formatCurrencyForPdf, formatDisplayDate } from '../../utils/subscriptionHelpers';
 
 export interface PdfReportOptions {
   title: string;
@@ -77,4 +79,200 @@ export function exportTableToPdf(options: PdfReportOptions): void {
   });
 
   doc.save(options.filename.endsWith('.pdf') ? options.filename : `${options.filename}.pdf`);
+}
+
+export function exportPaymentReceiptPdf(
+  payment: PaymentRecord,
+  organization?: Organization | null,
+  billingContact?: BillingContactConfig | null
+): void {
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'pt',
+    format: 'a4',
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const receiptNo = payment.receiptNumber || payment.id.toUpperCase();
+  const displayDate = formatDisplayDate(payment.createdAt);
+  const dateLabel = displayDate !== '—' ? displayDate : new Date().toISOString().slice(0, 10);
+  const cycleLabel = payment.billingCycle.replace('_', '-').toUpperCase();
+  const amountLabel = formatCurrencyForPdf(payment.amount, payment.currency || 'INR');
+
+  // Header Banner
+  doc.setFillColor(11, 25, 44);
+  doc.rect(0, 0, pageWidth, 84, 'F');
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(17);
+  doc.text('REXON MANAGEMENT APP', 36, 36);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(191, 219, 254);
+  doc.text('Official Subscription Payment Receipt', 36, 54);
+
+  // Right-aligned Receipt Badge
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(255, 255, 255);
+  doc.text(`RECEIPT #${receiptNo}`, pageWidth - 36, 38, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(191, 219, 254);
+  doc.text(`Date: ${dateLabel}`, pageWidth - 36, 54, { align: 'right' });
+
+  // Receipt Summary Boxes
+  doc.setDrawColor(226, 232, 240);
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(36, 104, pageWidth - 72, 92, 6, 6, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(100, 116, 139);
+  doc.text('BILLED TO (COMPANY / SOCIETY)', 52, 124);
+  doc.text('PAYMENT STATUS & VERIFICATION', pageWidth / 2 + 12, 124);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11.5);
+  doc.setTextColor(15, 23, 42);
+  doc.text(payment.organizationName || organization?.name || 'Registered Tenant', 52, 142);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Organization ID: ${payment.organizationId}`, 52, 158);
+  if (organization?.contactPerson || organization?.phone) {
+    doc.text(
+      `Contact: ${organization?.contactPerson || 'Admin'}${organization?.phone ? ` (${organization.phone})` : ''}`,
+      52,
+      173
+    );
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10.5);
+  if (payment.verificationStatus === 'Verified') {
+    doc.setTextColor(5, 150, 105);
+  } else if (payment.verificationStatus === 'Rejected') {
+    doc.setTextColor(225, 29, 72);
+  } else {
+    doc.setTextColor(180, 83, 9);
+  }
+  doc.text(payment.verificationStatus.toUpperCase(), pageWidth / 2 + 12, 142);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(71, 85, 105);
+  doc.text(
+    `Verified By: ${payment.verifiedBy || 'Awaiting Super Admin Verification'}`,
+    pageWidth / 2 + 12,
+    158
+  );
+  doc.text(`UTR / Ref Code: ${payment.referenceCode}`, pageWidth / 2 + 12, 173);
+
+  // Payment Line Items Table
+  autoTable(doc, {
+    startY: 218,
+    head: [['Description', 'Payment Mode', 'Billing Cycle', 'UTR / Reference', 'Amount (INR)']],
+    body: [
+      [
+        `REXON Platform Subscription - ${payment.planName}`,
+        payment.paymentMethod || 'Direct UPI / Bank Transfer',
+        cycleLabel,
+        payment.referenceCode,
+        amountLabel,
+      ],
+    ],
+    styles: {
+      fontSize: 9,
+      cellPadding: 8,
+      textColor: [30, 41, 59],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.5,
+    },
+    headStyles: {
+      fillColor: [29, 78, 216],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold',
+    },
+    columnStyles: {
+      4: { halign: 'right', fontStyle: 'bold' },
+    },
+    margin: { left: 36, right: 36 },
+  });
+
+  const tableEndY =
+    (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY || 300;
+
+  // Total Paid Box
+  doc.setFillColor(239, 246, 255);
+  doc.setDrawColor(191, 219, 254);
+  doc.roundedRect(pageWidth - 256, tableEndY + 14, 220, 42, 4, 4, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(30, 58, 138);
+  doc.text('TOTAL AMOUNT RECORDED', pageWidth - 244, tableEndY + 32);
+  doc.setFontSize(13);
+  doc.text(amountLabel, pageWidth - 48, tableEndY + 48, { align: 'right' });
+
+  let cursorY = tableEndY + 80;
+
+  if (payment.notes) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Remarks / Notes:', 36, cursorY);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(71, 85, 105);
+    doc.text(payment.notes, 36, cursorY + 15, { maxWidth: pageWidth - 72 });
+    cursorY += 42;
+  }
+
+  // Platform Billing & Helpline Info Footer
+  doc.setDrawColor(226, 232, 240);
+  doc.line(36, cursorY, pageWidth - 36, cursorY);
+  cursorY += 18;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(15, 23, 42);
+  doc.text('Platform Billing Support & Verification Notice', 36, cursorY);
+  cursorY += 15;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(71, 85, 105);
+  if (billingContact?.supportPhone) {
+    doc.text(
+      `Billing Helpline: ${billingContact.supportPhone}${billingContact.contactPersonName ? ` (${billingContact.contactPersonName})` : ''}${billingContact.supportEmail ? `  |  Email: ${billingContact.supportEmail}` : ''}`,
+      36,
+      cursorY
+    );
+    cursorY += 14;
+  }
+  if (billingContact?.upiId || billingContact?.bankName) {
+    const payParts = [
+      billingContact.upiId ? `UPI ID: ${billingContact.upiId}` : '',
+      billingContact.bankName
+        ? `Bank: ${billingContact.bankName}${billingContact.accountNumber ? ` (A/C: ${billingContact.accountNumber})` : ''}`
+        : '',
+    ].filter(Boolean);
+    if (payParts.length > 0) {
+      doc.text(payParts.join('  |  '), 36, cursorY);
+      cursorY += 14;
+    }
+  }
+
+  doc.text(
+    'This computer-generated receipt records your submitted subscription settlement reference. Plan activation takes effect once verified by Super Admin.',
+    36,
+    cursorY + 4,
+    { maxWidth: pageWidth - 72 }
+  );
+
+  const safeSlug = (payment.referenceCode || receiptNo).replace(/[^a-zA-Z0-9_-]/g, '_');
+  doc.save(`rexon-receipt-${safeSlug}.pdf`);
 }

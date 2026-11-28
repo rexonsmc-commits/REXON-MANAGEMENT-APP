@@ -25,7 +25,15 @@ const loginSchema = z.object({
 type LoginFormValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
-  const { userProfile, firebaseUser, loading, authError, refreshProfile, signOut } = useAuth();
+  const {
+    userProfile,
+    organization,
+    firebaseUser,
+    loading,
+    authError,
+    refreshProfile,
+    signOut,
+  } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -51,12 +59,27 @@ export function LoginPage() {
     },
   });
 
+  const isTenantUser =
+    userProfile?.role === 'organization_admin' || userProfile?.role === 'organization_staff';
+  const isStaffUser =
+    userProfile?.role === 'super_admin_staff' || userProfile?.role === 'organization_staff';
+  const isStaffPortalHidden = Boolean(isStaffUser && userProfile?.isHidden);
+  const isTenantOrgHidden = Boolean(isTenantUser && organization?.isHidden);
+  const isTenantOrgMissing = Boolean(isTenantUser && !organization);
+
   useEffect(() => {
     const effectiveStatus = userProfile?.accountStatus || userProfile?.status;
-    if (!loading && userProfile && effectiveStatus === 'active') {
+    if (
+      !loading &&
+      userProfile &&
+      effectiveStatus === 'active' &&
+      !isStaffPortalHidden &&
+      !isTenantOrgHidden &&
+      !isTenantOrgMissing
+    ) {
       navigate(ROLE_HOME_ROUTES[userProfile.role], { replace: true });
     }
-  }, [loading, userProfile, navigate]);
+  }, [loading, userProfile, isStaffPortalHidden, isTenantOrgHidden, isTenantOrgMissing, navigate]);
 
   const handleGoogleSignIn = async () => {
     setErrorMsg(null);
@@ -258,6 +281,69 @@ export function LoginPage() {
                     Sign Out & Switch Account
                   </button>
                 </div>
+              </div>
+            )}
+
+          {firebaseUser &&
+            !loading &&
+            userProfile &&
+            isStaffPortalHidden && (
+              <div className="mt-5 space-y-2.5 rounded-lg border border-rose-300 bg-rose-50 p-4 text-xs text-rose-900">
+                <p className="text-sm font-bold text-rose-950">
+                  Your portal is hidden. Please contact Super Admin.
+                </p>
+                <p className="leading-relaxed text-rose-800">
+                  Signed in as <strong>{firebaseUser.email}</strong>. Portal access for this staff
+                  account is currently hidden.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="rounded-md border border-rose-300 bg-white px-3 py-1.5 font-semibold text-rose-800 hover:bg-rose-100"
+                >
+                  Sign Out &amp; Switch Account
+                </button>
+              </div>
+            )}
+
+          {firebaseUser &&
+            !loading &&
+            userProfile &&
+            !isStaffPortalHidden &&
+            isTenantOrgHidden && (
+              <div className="mt-5 space-y-2.5 rounded-lg border border-rose-300 bg-rose-50 p-4 text-xs text-rose-900">
+                <p className="text-sm font-bold text-rose-950">
+                  Your Company / Society is hidden. Please contact Super Admin.
+                </p>
+                <p className="leading-relaxed text-rose-800">
+                  Access for <strong>{organization?.name || 'your company / society'}</strong> has
+                  been temporarily hidden by the Super Admin.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="rounded-md border border-rose-300 bg-white px-3 py-1.5 font-semibold text-rose-800 hover:bg-rose-100"
+                >
+                  Sign Out &amp; Switch Account
+                </button>
+              </div>
+            )}
+
+          {firebaseUser &&
+            !loading &&
+            userProfile &&
+            isTenantOrgMissing && (
+              <div className="mt-5 space-y-2.5 rounded-lg border border-rose-300 bg-rose-50 p-4 text-xs text-rose-900">
+                <p className="text-sm font-bold text-rose-950">
+                  Company / Society record unavailable. Please contact Super Admin.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="rounded-md border border-rose-300 bg-white px-3 py-1.5 font-semibold text-rose-800 hover:bg-rose-100"
+                >
+                  Sign Out &amp; Switch Account
+                </button>
               </div>
             )}
 

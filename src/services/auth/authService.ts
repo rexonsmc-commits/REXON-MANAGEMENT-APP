@@ -214,6 +214,7 @@ export async function syncProvisionedAccountProfile(params: {
     if (invite.organizationName) userPayload.organizationName = invite.organizationName;
     if (invite.designation) userPayload.designation = invite.designation;
     if (invite.department) userPayload.department = invite.department;
+    if (invite.isHidden) userPayload.isHidden = true;
 
     await setDoc(userRef, userPayload).catch(() => undefined);
   } catch {
@@ -451,7 +452,27 @@ async function resolveTrustedUserProfileInternal(
     ) {
       await ensureSuperAdminSingletons(uid, emailLower).catch(() => undefined);
     }
-    if (effectiveStatus === 'active') {
+    let resolvedHidden = Boolean(existingProfile.isHidden);
+    if (
+      !resolvedHidden &&
+      (existingProfile.role === 'super_admin_staff' || existingProfile.role === 'organization_staff')
+    ) {
+      try {
+        const inviteRef = doc(db, 'invitedAccounts', emailLower);
+        const inviteSnap = forceServerRefresh
+          ? await getDocFromServer(inviteRef).catch(() => getDoc(inviteRef))
+          : await getDoc(inviteRef);
+        if (inviteSnap.exists()) {
+          const inviteData = inviteSnap.data() as InvitedAccount;
+          if (inviteData.isHidden) {
+            resolvedHidden = true;
+          }
+        }
+      } catch {
+        // Ignore if invite doc no longer exists or cannot be read
+      }
+    }
+    if (effectiveStatus === 'active' && !resolvedHidden) {
       updateDoc(userRef, {
         lastLoginAt: serverTimestamp(),
         emailVerified: Boolean(firebaseUser.emailVerified),
@@ -462,6 +483,7 @@ async function resolveTrustedUserProfileInternal(
       ...existingProfile,
       status: effectiveStatus,
       accountStatus: effectiveStatus,
+      isHidden: resolvedHidden,
     };
   }
 
@@ -537,7 +559,7 @@ async function resolveTrustedUserProfileInternal(
   }
 
   const invite = inviteSnap.data() as InvitedAccount;
-  if (invite.status !== 'active') {
+  if (invite.status !== 'active' || invite.isHidden) {
     return {
       uid,
       email: emailLower,
@@ -548,6 +570,7 @@ async function resolveTrustedUserProfileInternal(
       permissions: invite.permissions || [],
       status: invite.status,
       accountStatus: invite.status,
+      isHidden: Boolean(invite.isHidden),
     };
   }
 

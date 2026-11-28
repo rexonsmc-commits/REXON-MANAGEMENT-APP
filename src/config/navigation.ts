@@ -23,22 +23,16 @@ export interface NavItem {
 export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
   super_admin: [
     { label: 'Dashboard', path: '/super-admin/dashboard', iconName: 'LayoutDashboard' },
-    { label: 'Company / Society Management', path: '/super-admin/organizations', iconName: 'Building2' },
-    { label: 'Staff Management', path: '/super-admin/staff', iconName: 'Users' },
     { label: 'Subscription Plans', path: '/super-admin/plans', iconName: 'CreditCard' },
     { label: 'Payments', path: '/super-admin/payments', iconName: 'Receipt' },
+    { label: 'Company / Society Management', path: '/super-admin/organizations', iconName: 'Building2' },
+    { label: 'Staff Management', path: '/super-admin/staff', iconName: 'Users' },
     { label: 'Reports', path: '/super-admin/reports', iconName: 'FileBarChart' },
     { label: 'Settings', path: '/super-admin/settings', iconName: 'Settings' },
     { label: 'Profile', path: '/super-admin/profile', iconName: 'UserCircle' },
   ],
   super_admin_staff: [
     { label: 'Dashboard', path: '/super-admin-staff/dashboard', iconName: 'LayoutDashboard' },
-    {
-      label: 'Company / Society',
-      path: '/super-admin-staff/organizations',
-      iconName: 'Building2',
-      requiredPermission: 'manage_organizations',
-    },
     {
       label: 'Subscription Plans',
       path: '/super-admin-staff/plans',
@@ -50,6 +44,12 @@ export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
       path: '/super-admin-staff/payments',
       iconName: 'Receipt',
       requiredPermission: 'view_payments',
+    },
+    {
+      label: 'Company / Society',
+      path: '/super-admin-staff/organizations',
+      iconName: 'Building2',
+      requiredPermission: 'manage_organizations',
     },
     {
       label: 'Reports',
@@ -67,14 +67,14 @@ export const ROLE_NAVIGATION: Record<UserRole, NavItem[]> = {
   ],
   organization_admin: [
     { label: 'Dashboard', path: '/organization-admin/dashboard', iconName: 'LayoutDashboard' },
-    { label: 'Organization Profile', path: '/organization-admin/profile', iconName: 'Building2' },
+    { label: 'Company / Society Profile', path: '/organization-admin/profile', iconName: 'Building2' },
+    { label: 'Subscription', path: '/organization-admin/subscription', iconName: 'CreditCard' },
     { label: 'Staff Management', path: '/organization-admin/staff', iconName: 'Users' },
     { label: 'Property Management', path: '/organization-admin/properties', iconName: 'Home' },
     { label: 'Tower Management', path: '/organization-admin/towers', iconName: 'Building' },
     { label: 'Wing Management', path: '/organization-admin/wings', iconName: 'Layers' },
     { label: 'Flat Management', path: '/organization-admin/flats', iconName: 'DoorOpen' },
     { label: 'Reports', path: '/organization-admin/reports', iconName: 'FileBarChart' },
-    { label: 'Subscription', path: '/organization-admin/subscription', iconName: 'CreditCard' },
     { label: 'Settings', path: '/organization-admin/settings', iconName: 'Settings' },
   ],
   organization_staff: [

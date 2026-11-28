@@ -12,7 +12,7 @@ import { Organization, OrganizationStaff, Subscription } from '../../types';
 import { DEMO_ORGANIZATIONS, DEMO_ORG_STAFF } from '../../utils/demoData';
 
 export function SuperAdminReportsPage() {
-  const { userProfile, hasPermission } = useAuth();
+  const { userProfile, firebaseUser, hasPermission } = useAuth();
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [orgStaff, setOrgStaff] = useState<OrganizationStaff[]>([]);
   const [subs, setSubs] = useState<Subscription[]>([]);
@@ -26,17 +26,23 @@ export function SuperAdminReportsPage() {
   const canExport = userProfile?.role === 'super_admin' || hasPermission('export_pdf');
 
   useEffect(() => {
+    if (!userProfile || !firebaseUser) return;
+    let active = true;
     Promise.all([
       listOrganizations().catch(() => []),
       listAllOrganizationStaffGlobal().catch(() => []),
       listSubscriptions().catch(() => []),
     ]).then(([o, s, sub]) => {
+      if (!active) return;
       setOrgs(o);
       setOrgStaff(s);
       setSubs(sub);
       if (o.length === 0) setDemoPreview(true);
     });
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [userProfile, firebaseUser]);
 
   const activeOrgs = demoPreview ? DEMO_ORGANIZATIONS : orgs;
   const activeStaff = demoPreview ? DEMO_ORG_STAFF : orgStaff;

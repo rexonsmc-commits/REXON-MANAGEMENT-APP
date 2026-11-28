@@ -45,6 +45,8 @@
         "permissions": { "type": "array" },
         "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
         "accountStatus": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "isHidden": { "type": "boolean" },
+        "hiddenAt": { "type": "string", "format": "date-time" },
         "emailVerified": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" },
@@ -70,6 +72,8 @@
         "department": { "type": "string", "maxLength": 100 },
         "permissions": { "type": "array" },
         "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "isHidden": { "type": "boolean" },
+        "hiddenAt": { "type": "string", "format": "date-time" },
         "invitedBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -115,6 +119,8 @@
         "subscriptionStartDate": { "type": "string", "maxLength": 40 },
         "subscriptionExpiryDate": { "type": "string", "maxLength": 40 },
         "accountStatus": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "isHidden": { "type": "boolean" },
+        "hiddenAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -137,6 +143,8 @@
         "assignedRole": { "type": "string", "minLength": 1, "maxLength": 100 },
         "permissions": { "type": "array" },
         "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "isHidden": { "type": "boolean" },
+        "hiddenAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -161,6 +169,8 @@
         "role": { "type": "string", "minLength": 1, "maxLength": 100 },
         "permissions": { "type": "array" },
         "status": { "type": "string", "enum": ["pending", "active", "inactive", "suspended", "disabled"] },
+        "isHidden": { "type": "boolean" },
+        "hiddenAt": { "type": "string", "format": "date-time" },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -239,6 +249,9 @@
         "amount": { "type": "number" },
         "currency": { "type": "string", "maxLength": 10 },
         "billingCycle": { "type": "string", "enum": ["monthly", "quarterly", "half_yearly", "yearly"] },
+        "paymentMethod": { "type": "string", "maxLength": 60 },
+        "receiptNumber": { "type": "string", "maxLength": 60 },
+        "paymentProofDataUrl": { "type": "string", "maxLength": 450000 },
         "referenceCode": { "type": "string", "minLength": 2, "maxLength": 100 },
         "verificationStatus": { "type": "string", "enum": ["Pending Verification", "Verified", "Rejected"] },
         "verifiedBy": { "type": "string", "maxLength": 128 },
@@ -327,6 +340,47 @@
       },
       "required": ["id", "name", "email", "phone", "subject", "message", "status", "createdAt"]
     },
+    "BillingContactConfig": {
+      "title": "BillingContactConfig",
+      "description": "Super Admin configured direct payment support contact, UPI ID/QR scanner, and net banking details displayed to organizations on renewal.",
+      "type": "object",
+      "properties": {
+        "supportPhone": { "type": "string", "maxLength": 40 },
+        "supportEmail": { "type": "string", "maxLength": 160 },
+        "contactPersonName": { "type": "string", "maxLength": 120 },
+        "paymentInstructions": { "type": "string", "maxLength": 600 },
+        "upiOrBankNote": { "type": "string", "maxLength": 400 },
+        "upiId": { "type": "string", "maxLength": 120 },
+        "upiNumber": { "type": "string", "maxLength": 40 },
+        "upiPayeeName": { "type": "string", "maxLength": 120 },
+        "qrCodeDataUrl": { "type": "string", "maxLength": 400000 },
+        "bankName": { "type": "string", "maxLength": 120 },
+        "accountHolderName": { "type": "string", "maxLength": 120 },
+        "accountNumber": { "type": "string", "maxLength": 60 },
+        "ifscCode": { "type": "string", "maxLength": 30 },
+        "bankBranch": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["supportPhone", "paymentInstructions", "updatedAt"]
+    },
+    "CustomPermission": {
+      "title": "CustomPermission",
+      "description": "Custom role permission defined dynamically by Super Admin (platform scope) or Organization Admin (organization scope).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "scope": { "type": "string", "enum": ["platform", "organization"] },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "key": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-z0-9_.\\-]+$" },
+        "label": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 240 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "scope", "key", "label", "category", "createdBy", "createdAt", "updatedAt"]
+    },
     "AuditLog": {
       "title": "AuditLog",
       "description": "Append-only administrative audit log.",
@@ -356,6 +410,14 @@
     "/systemConfig/superAdmin": {
       "schema": { "$ref": "#/entities/SystemSuperAdmin" },
       "description": "Unique Super Admin singleton document."
+    },
+    "/systemConfig/billingContact": {
+      "schema": { "$ref": "#/entities/BillingContactConfig" },
+      "description": "Super Admin configured direct payment phone & offline renewal contact instructions."
+    },
+    "/customPermissions/{permId}": {
+      "schema": { "$ref": "#/entities/CustomPermission" },
+      "description": "Custom permissions created dynamically for Super Admin Staff or Organization Staff."
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },

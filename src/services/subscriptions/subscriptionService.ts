@@ -13,6 +13,7 @@ import {
 import { FIELD_LIMITS } from '../../config/permissions';
 import {
   AuditLog,
+  BillingContactConfig,
   ContactMessage,
   PaymentRecord,
   Subscription,
@@ -220,11 +221,29 @@ export async function listPayments(organizationId?: string): Promise<PaymentReco
   }
 }
 
+const SAFE_PROOF_DATA_URL_REGEX = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/;
+
 export async function createPaymentRecord(
   input: Omit<PaymentRecord, 'id' | 'createdAt' | 'updatedAt'>,
   actor: UserProfile
 ): Promise<PaymentRecord> {
+  const proofDataUrl = input.paymentProofDataUrl?.trim() || '';
+  if (proofDataUrl) {
+    if (!SAFE_PROOF_DATA_URL_REGEX.test(proofDataUrl) || proofDataUrl.length > 450000) {
+      throw new Error(
+        'Invalid or oversized payment proof image. Please upload a PNG, JPG, or WEBP screenshot.'
+      );
+    }
+  }
+
   const id = generateSafeId('pay');
+  const generatedReceipt =
+    input.receiptNumber?.trim().slice(0, 60) ||
+    `RCPT-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random()
+      .toString(36)
+      .slice(2, 6)
+      .toUpperCase()}`;
+
   const payload: Record<string, unknown> = {
     id,
     organizationId: input.organizationId,
@@ -234,11 +253,18 @@ export async function createPaymentRecord(
     amount: Number(input.amount),
     currency: input.currency.trim().slice(0, 10),
     billingCycle: input.billingCycle,
+    receiptNumber: generatedReceipt,
     referenceCode: input.referenceCode.trim().slice(0, 100),
     verificationStatus: input.verificationStatus,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
+  if (input.paymentMethod?.trim()) {
+    payload.paymentMethod = input.paymentMethod.trim().slice(0, 60);
+  }
+  if (proofDataUrl) {
+    payload.paymentProofDataUrl = proofDataUrl;
+  }
   if (input.verifiedBy) payload.verifiedBy = input.verifiedBy;
   if (input.notes) payload.notes = input.notes.trim().slice(0, 300);
 
@@ -251,9 +277,51 @@ export async function createPaymentRecord(
       targetId: id,
       summary: `Logged payment reference ${payload.referenceCode} (${payload.verificationStatus})`,
     });
-    return { ...(payload as unknown as PaymentRecord), id };
+    const nowIso = new Date().toISOString();
+    return {
+      ...(payload as unknown as PaymentRecord),
+      id,
+      receiptNumber: generatedReceipt,
+      paymentProofDataUrl: proofDataUrl || undefined,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `payments/${id}`);
+  }
+}
+
+export async function attachPaymentProof(
+  paymentId: string,
+  proofDataUrl: string,
+  actor: UserProfile
+): Promise<void> {
+  const cleanUrl = proofDataUrl.trim();
+  if (!SAFE_PROOF_DATA_URL_REGEX.test(cleanUrl) || cleanUrl.length > 450000) {
+    throw new Error(
+      'Invalid or oversized payment proof image. Please upload a PNG, JPG, or WEBP screenshot.'
+    );
+  }
+
+  try {
+    const snap = await getDoc(doc(db, 'payments', paymentId));
+    if (!snap.exists()) throw new Error('Payment record not found');
+    const cur = snap.data() as PaymentRecord;
+
+    await updateDoc(doc(db, 'payments', paymentId), {
+      paymentProofDataUrl: cleanUrl,
+      updatedAt: serverTimestamp(),
+    });
+
+    await createAuditLog(actor, {
+      organizationId: cur.organizationId,
+      action: 'ATTACH_PAYMENT_PROOF',
+      targetCollection: 'payments',
+      targetId: paymentId,
+      summary: `Uploaded payment proof for reference ${cur.referenceCode}`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `payments/${paymentId}`);
   }
 }
 
@@ -361,3 +429,88 @@ export async function listContactMessages(): Promise<ContactMessage[]> {
     handleFirestoreError(error, OperationType.LIST, 'contactMessages');
   }
 }
+
+// =========================================================================
+// DIRECT PAYMENT & SUPPORT CONTACT SETTINGS
+// =========================================================================
+
+export async function getBillingContactConfig(): Promise<BillingContactConfig | null> {
+  try {
+    const snap = await getDoc(doc(db, 'systemConfig', 'billingContact'));
+    if (!snap.exists()) return null;
+    return snap.data() as BillingContactConfig;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'systemConfig/billingContact');
+  }
+}
+
+const SAFE_QR_DATA_URL_REGEX = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/;
+
+export async function saveBillingContactConfig(
+  input: Omit<BillingContactConfig, 'updatedAt'>,
+  actor: UserProfile
+): Promise<void> {
+  const qrDataUrl = input.qrCodeDataUrl?.trim() || '';
+  if (qrDataUrl) {
+    if (!SAFE_QR_DATA_URL_REGEX.test(qrDataUrl) || qrDataUrl.length > 400000) {
+      throw new Error(
+        'Invalid or oversized QR code image. Please upload a PNG, JPG, or WEBP image under 350 KB.'
+      );
+    }
+  }
+
+  const payload: Record<string, unknown> = {
+    supportPhone: input.supportPhone.trim().slice(0, FIELD_LIMITS.PHONE_MAX),
+    paymentInstructions: input.paymentInstructions.trim().slice(0, 600),
+    updatedAt: serverTimestamp(),
+  };
+  if (input.supportEmail?.trim()) {
+    payload.supportEmail = input.supportEmail.trim().slice(0, FIELD_LIMITS.EMAIL_MAX);
+  }
+  if (input.contactPersonName?.trim()) {
+    payload.contactPersonName = input.contactPersonName.trim().slice(0, FIELD_LIMITS.NAME_MAX);
+  }
+  if (input.upiOrBankNote?.trim()) {
+    payload.upiOrBankNote = input.upiOrBankNote.trim().slice(0, 400);
+  }
+  if (input.upiId?.trim()) {
+    payload.upiId = input.upiId.trim().slice(0, 120);
+  }
+  if (input.upiNumber?.trim()) {
+    payload.upiNumber = input.upiNumber.trim().slice(0, FIELD_LIMITS.PHONE_MAX);
+  }
+  if (input.upiPayeeName?.trim()) {
+    payload.upiPayeeName = input.upiPayeeName.trim().slice(0, 120);
+  }
+  if (qrDataUrl) {
+    payload.qrCodeDataUrl = qrDataUrl;
+  }
+  if (input.bankName?.trim()) {
+    payload.bankName = input.bankName.trim().slice(0, 120);
+  }
+  if (input.accountHolderName?.trim()) {
+    payload.accountHolderName = input.accountHolderName.trim().slice(0, 120);
+  }
+  if (input.accountNumber?.trim()) {
+    payload.accountNumber = input.accountNumber.trim().slice(0, 60);
+  }
+  if (input.ifscCode?.trim()) {
+    payload.ifscCode = input.ifscCode.trim().toUpperCase().slice(0, 30);
+  }
+  if (input.bankBranch?.trim()) {
+    payload.bankBranch = input.bankBranch.trim().slice(0, 120);
+  }
+
+  try {
+    await setDoc(doc(db, 'systemConfig', 'billingContact'), payload);
+    await createAuditLog(actor, {
+      action: 'UPDATE_BILLING_CONTACT',
+      targetCollection: 'systemConfig',
+      targetId: 'billingContact',
+      summary: `Updated direct payment, UPI QR & bank settings (${String(payload.supportPhone || 'saved')})`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'systemConfig/billingContact');
+  }
+}
+

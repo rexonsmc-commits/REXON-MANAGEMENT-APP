@@ -89,6 +89,37 @@ export interface SystemConfigMain {
   updatedAt?: unknown;
 }
 
+export interface BillingContactConfig {
+  supportPhone: string;
+  supportEmail?: string;
+  contactPersonName?: string;
+  paymentInstructions: string;
+  upiOrBankNote?: string;
+  upiId?: string;
+  upiNumber?: string;
+  upiPayeeName?: string;
+  qrCodeDataUrl?: string;
+  bankName?: string;
+  accountHolderName?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  bankBranch?: string;
+  updatedAt?: unknown;
+}
+
+export interface CustomPermission {
+  id: string;
+  scope: 'platform' | 'organization';
+  organizationId?: string;
+  key: string;
+  label: string;
+  description?: string;
+  category: string;
+  createdBy: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
 export interface UserProfile {
   uid: string;
   email: string;
@@ -105,6 +136,8 @@ export interface UserProfile {
   permissions: string[];
   status: AccountStatus;
   accountStatus?: AccountStatus;
+  isHidden?: boolean;
+  hiddenAt?: unknown;
   emailVerified?: boolean;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -125,6 +158,8 @@ export interface InvitedAccount {
   department?: string;
   permissions: string[];
   status: AccountStatus;
+  isHidden?: boolean;
+  hiddenAt?: unknown;
   invitedBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -148,6 +183,8 @@ export interface Organization {
   subscriptionStartDate?: string;
   subscriptionExpiryDate?: string;
   accountStatus: AccountStatus;
+  isHidden?: boolean;
+  hiddenAt?: unknown;
   createdBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -163,8 +200,10 @@ export interface SuperAdminStaff {
   designation: string;
   department: string;
   assignedRole: string;
-  permissions: SuperAdminPermissionKey[];
+  permissions: (SuperAdminPermissionKey | (string & {}))[];
   status: AccountStatus;
+  isHidden?: boolean;
+  hiddenAt?: unknown;
   createdBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -182,8 +221,10 @@ export interface OrganizationStaff {
   designation: string;
   department: string;
   role: string;
-  permissions: OrgStaffPermissionKey[];
+  permissions: (OrgStaffPermissionKey | (string & {}))[];
   status: AccountStatus;
+  isHidden?: boolean;
+  hiddenAt?: unknown;
   createdBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -194,7 +235,7 @@ export interface RoleTemplate {
   organizationId: string;
   name: string;
   description?: string;
-  permissions: OrgStaffPermissionKey[];
+  permissions: (OrgStaffPermissionKey | (string & {}))[];
   createdBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -242,6 +283,9 @@ export interface PaymentRecord {
   amount: number;
   currency: string;
   billingCycle: BillingCycle;
+  paymentMethod?: string;
+  receiptNumber?: string;
+  paymentProofDataUrl?: string;
   referenceCode: string;
   verificationStatus: PaymentVerificationStatus;
   verifiedBy?: string;

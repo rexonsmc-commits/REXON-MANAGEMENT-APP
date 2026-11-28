@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Download,
   Edit2,
@@ -7,17 +8,19 @@ import {
   KeyRound,
   Link2,
   Plus,
-  Power,
   RefreshCw,
+  ShieldPlus,
   Trash2,
 } from 'lucide-react';
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { ColumnDef, DataTable } from '../../components/common/DataTable';
 import { ConfirmDialog, Modal } from '../../components/common/Modal';
+import { CustomPermissionModal } from '../../components/common/CustomPermissionModal';
 import {
   generateStrongPassword,
   LoginCredentialsModal,
 } from '../../components/common/LoginCredentialsModal';
+import { PdfExportModal, PdfFilterValues } from '../../components/common/PdfExportModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import { SUPER_ADMIN_STAFF_PERMISSIONS } from '../../config/permissions';
@@ -28,14 +31,24 @@ import {
   syncProvisionedAccountProfile,
 } from '../../services/auth/authService';
 import {
+  createCustomPermission,
   createSuperAdminStaff,
+  deleteCustomPermission,
   deleteSuperAdminStaff,
+  listCustomPermissions,
   listSuperAdminStaff,
+  setSuperAdminStaffHiddenState,
   updateSuperAdminStaff,
 } from '../../services/staff/staffService';
 import { exportTableToPdf } from '../../services/reports/pdfService';
-import { AccountStatus, SuperAdminPermissionKey, SuperAdminStaff } from '../../types';
+import {
+  AccountStatus,
+  CustomPermission,
+  SuperAdminPermissionKey,
+  SuperAdminStaff,
+} from '../../types';
 import { DEMO_SUPER_ADMIN_STAFF } from '../../utils/demoData';
+import { formatDisplayDate, matchesDateFilter } from '../../utils/subscriptionHelpers';
 
 interface CredentialsModalState {
   open: boolean;
@@ -48,10 +61,12 @@ interface CredentialsModalState {
 }
 
 export function SuperAdminStaffPage() {
-  const { userProfile } = useAuth();
+  const { userProfile, isSuperAdmin } = useAuth();
   const { showToast } = useToast();
+  const navigate = useNavigate();
 
   const [staffList, setStaffList] = useState<SuperAdminStaff[]>([]);
+  const [customPermissions, setCustomPermissions] = useState<CustomPermission[]>([]);
   const [loading, setLoading] = useState(true);
   const [demoPreview, setDemoPreview] = useState(false);
 
@@ -59,8 +74,11 @@ export function SuperAdminStaffPage() {
   const [statusFilter, setStatusFilter] = useState('all');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [permModalOpen, setPermModalOpen] = useState(false);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [editingStaff, setEditingStaff] = useState<SuperAdminStaff | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SuperAdminStaff | null>(null);
+  const [togglingHideId, setTogglingHideId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Form state
@@ -72,7 +90,9 @@ export function SuperAdminStaffPage() {
   const [department, setDepartment] = useState('');
   const [assignedRole, setAssignedRole] = useState('');
   const [status, setStatus] = useState<AccountStatus>('active');
-  const [permissions, setPermissions] = useState<SuperAdminPermissionKey[]>(['view_dashboard']);
+  const [permissions, setPermissions] = useState<(SuperAdminPermissionKey | (string & {}))[]>([
+    'view_dashboard',
+  ]);
 
   // Firebase Auth Login ID & Password provisioning
   const [createAuthCredentials, setCreateAuthCredentials] = useState(true);
@@ -87,8 +107,12 @@ export function SuperAdminStaffPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listSuperAdminStaff();
+      const [data, customPerms] = await Promise.all([
+        listSuperAdminStaff(),
+        listCustomPermissions('platform').catch(() => []),
+      ]);
       setStaffList(data);
+      setCustomPermissions(customPerms);
     } catch (err) {
       showToast('Failed to load staff', 'error', err instanceof Error ? err.message : undefined);
     } finally {
@@ -100,6 +124,25 @@ export function SuperAdminStaffPage() {
     void loadData();
   }, [loadData]);
 
+  const availablePermissions = useMemo(() => {
+    const builtIn = SUPER_ADMIN_STAFF_PERMISSIONS.map((p) => ({
+      key: p.key as string,
+      label: p.label,
+      description: p.description,
+      isCustom: false,
+    }));
+    const existingKeys = new Set(builtIn.map((b) => b.key));
+    const extras = customPermissions
+      .filter((c) => !existingKeys.has(c.key))
+      .map((c) => ({
+        key: c.key,
+        label: c.label,
+        description: c.description || c.category,
+        isCustom: true,
+      }));
+    return [...builtIn, ...extras];
+  }, [customPermissions]);
+
   const activeData = demoPreview ? DEMO_SUPER_ADMIN_STAFF : staffList;
 
   const filtered = useMemo(() => {
@@ -109,7 +152,12 @@ export function SuperAdminStaffPage() {
         s.name.toLowerCase().includes(search.toLowerCase()) ||
         s.email.toLowerCase().includes(search.toLowerCase()) ||
         s.department.toLowerCase().includes(search.toLowerCase());
-      const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
+      const matchesStatus =
+        statusFilter === 'all'
+          ? true
+          : statusFilter === 'hidden'
+            ? Boolean(s.isHidden)
+            : s.status === statusFilter;
       return matchesSearch && matchesStatus;
     });
   }, [activeData, search, statusFilter]);
@@ -158,7 +206,7 @@ export function SuperAdminStaffPage() {
     });
   };
 
-  const togglePermission = (key: SuperAdminPermissionKey) => {
+  const togglePermission = (key: string) => {
     setPermissions((prev) =>
       prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key]
     );
@@ -270,15 +318,31 @@ export function SuperAdminStaffPage() {
     }
   };
 
-  const handleToggleStatus = async (staff: SuperAdminStaff) => {
-    if (!userProfile) return;
-    const nextStatus: AccountStatus = staff.status === 'active' ? 'inactive' : 'active';
+  const handleViewDetails = (staff: SuperAdminStaff) => {
+    if (!isSuperAdmin()) return;
+    navigate(`/super-admin-staff/dashboard?staffId=${encodeURIComponent(staff.id)}`, {
+      state: { inspectStaff: staff, inspectStaffKind: 'super_admin_staff' },
+    });
+  };
+
+  const handleToggleHide = async (staff: SuperAdminStaff) => {
+    if (!userProfile || !isSuperAdmin()) return;
+    const nextHidden = !Boolean(staff.isHidden);
+    setTogglingHideId(staff.id);
     try {
-      await updateSuperAdminStaff(staff.id, { status: nextStatus }, userProfile);
-      showToast(`Staff marked ${nextStatus}`, 'success', staff.name);
+      await setSuperAdminStaffHiddenState(staff.id, staff.name, nextHidden, userProfile);
+      showToast(
+        nextHidden ? 'Staff portal hidden' : 'Staff portal restored',
+        'success',
+        nextHidden
+          ? `${staff.name} is now blocked from logging into their portal.`
+          : `${staff.name} can now log in again.`
+      );
       await loadData();
     } catch (err) {
-      showToast('Status update failed', 'error', err instanceof Error ? err.message : undefined);
+      showToast('Failed to update visibility', 'error', err instanceof Error ? err.message : undefined);
+    } finally {
+      setTogglingHideId(null);
     }
   };
 
@@ -287,7 +351,7 @@ export function SuperAdminStaffPage() {
     setSaving(true);
     try {
       await deleteSuperAdminStaff(deleteTarget.id, deleteTarget.name, userProfile);
-      showToast('Staff removed', 'success', deleteTarget.name);
+      showToast('Staff removed & access revoked', 'success', deleteTarget.name);
       setDeleteTarget(null);
       await loadData();
     } catch (err) {
@@ -297,12 +361,26 @@ export function SuperAdminStaffPage() {
     }
   };
 
-  const handlePdfExport = () => {
+  const filterStaffForPdf = (filters: PdfFilterValues) => {
+    return activeData.filter((s) => {
+      if (filters.dateFilter.mode !== 'all' && !matchesDateFilter(s.createdAt, filters.dateFilter)) {
+        return false;
+      }
+      if (filters.extraFilter !== 'all' && s.status !== filters.extraFilter) {
+        return false;
+      }
+      return true;
+    });
+  };
+
+  const handlePdfExport = (filters: PdfFilterValues, filterSummary: string) => {
+    const rowsData = filterStaffForPdf(filters);
     exportTableToPdf({
       title: 'Super Admin Staff Directory',
+      subtitle: `${demoPreview ? 'Demo Preview' : 'Live Directory'}  |  ${filterSummary}`,
       generatedBy: userProfile?.email || 'Super Admin',
-      columns: ['Name', 'Email', 'Designation', 'Department', 'Role', 'Permissions', 'Status'],
-      rows: filtered.map((s) => [
+      columns: ['Name', 'Email', 'Designation', 'Department', 'Role', 'Permissions', 'Status', 'Added'],
+      rows: rowsData.map((s) => [
         s.name,
         s.email,
         s.designation,
@@ -310,6 +388,7 @@ export function SuperAdminStaffPage() {
         s.assignedRole,
         s.permissions.length,
         s.status,
+        formatDisplayDate(s.createdAt),
       ]),
       filename: 'rexon-super-admin-staff',
     });
@@ -352,50 +431,95 @@ export function SuperAdminStaffPage() {
     {
       key: 'status',
       header: 'Status',
-      render: (s) => <StatusLabel status={s.status} />,
+      render: (s) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusLabel status={s.status} />
+          {s.isHidden && (
+            <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+              Hidden
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       key: 'actions',
-      header: 'Login Access & Actions',
+      header: 'Actions & Portal Access',
       align: 'right',
       render: (s) =>
         demoPreview ? (
           <span className="text-xs text-slate-400">Preview only</span>
         ) : (
-          <div className="inline-flex items-center gap-1.5">
+          <div className="ml-auto flex w-[160px] flex-col items-stretch gap-1.5">
+            {isSuperAdmin() && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleViewDetails(s)}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap"
+                  title="Open this Staff Member's portal directly without password"
+                >
+                  <Eye className="h-3.5 w-3.5 shrink-0" />
+                  <span>View Details</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={togglingHideId === s.id}
+                  onClick={() => void handleToggleHide(s)}
+                  className={`inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap disabled:opacity-60 ${
+                    s.isHidden
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                      : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  }`}
+                  title={
+                    s.isHidden
+                      ? 'Unhide staff member so they can log in again'
+                      : 'Hide staff member and block portal login'
+                  }
+                >
+                  {s.isHidden ? (
+                    <>
+                      <Eye className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === s.id ? 'Updating...' : 'Unhide'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5 shrink-0" />
+                      <span>{togglingHideId === s.id ? 'Updating...' : 'Hide'}</span>
+                    </>
+                  )}
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => openCredentialsModalForStaff(s)}
-              className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-[#1D4ED8] hover:bg-blue-100"
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-[#1D4ED8] hover:bg-blue-100 whitespace-nowrap"
               title="Login ID, Password & Dashboard Login Link"
             >
-              <KeyRound className="h-3.5 w-3.5" />
+              <KeyRound className="h-3.5 w-3.5 shrink-0" />
               <span>Login ID &amp; Pass</span>
             </button>
-            <button
-              type="button"
-              onClick={() => openEdit(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#1D4ED8]"
-              title="Edit staff & permissions"
-            >
-              <Edit2 className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleToggleStatus(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-amber-50 hover:text-amber-700"
-              title="Toggle Active/Inactive"
-            >
-              <Power className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setDeleteTarget(s)}
-              className="rounded-md p-1.5 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
-              title="Delete staff"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => openEdit(s)}
+                className="inline-flex items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-[#1D4ED8] whitespace-nowrap"
+                title="Edit staff & permissions"
+              >
+                <Edit2 className="h-3.5 w-3.5 shrink-0" />
+                <span>Edit</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(s)}
+                className="inline-flex items-center justify-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap"
+                title="Delete staff and revoke portal access"
+              >
+                <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                <span>Delete</span>
+              </button>
+            </div>
           </div>
         ),
     },
@@ -406,14 +530,22 @@ export function SuperAdminStaffPage() {
       title="Super Admin Staff Management"
       subtitle="Provision global operations staff, configure Firebase Auth login credentials, and assign granular platform permissions."
       actions={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={handlePdfExport}
+            onClick={() => setPdfModalOpen(true)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
           >
             <Download className="h-4 w-4" />
             <span>Export PDF</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPermModalOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-[#1D4ED8] hover:bg-blue-100 whitespace-nowrap"
+          >
+            <ShieldPlus className="h-4 w-4" />
+            <span>Add New Permission</span>
           </button>
           <button
             type="button"
@@ -451,6 +583,7 @@ export function SuperAdminStaffPage() {
               options: [
                 { label: 'All Statuses', value: 'all' },
                 { label: 'Active', value: 'active' },
+                { label: 'Hidden', value: 'hidden' },
                 { label: 'Pending', value: 'pending' },
                 { label: 'Inactive', value: 'inactive' },
                 { label: 'Suspended', value: 'suspended' },
@@ -662,16 +795,25 @@ export function SuperAdminStaffPage() {
           </div>
 
           <div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="block text-xs font-semibold text-slate-700">
                 Custom Permission Assignment
               </label>
-              <span className="text-xs text-slate-500 tabular-nums">
-                {permissions.length} / {SUPER_ADMIN_STAFF_PERMISSIONS.length} selected
-              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPermModalOpen(true)}
+                  className="text-[11px] font-semibold text-[#1D4ED8] hover:underline"
+                >
+                  + Add New Permission
+                </button>
+                <span className="text-xs text-slate-500 tabular-nums">
+                  {permissions.length} / {availablePermissions.length} selected
+                </span>
+              </div>
             </div>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {SUPER_ADMIN_STAFF_PERMISSIONS.map((perm) => {
+              {availablePermissions.map((perm) => {
                 const checked = permissions.includes(perm.key);
                 return (
                   <label
@@ -689,7 +831,14 @@ export function SuperAdminStaffPage() {
                       className="mt-0.5 rounded border-slate-300 text-[#1D4ED8]"
                     />
                     <div>
-                      <p className="font-semibold text-slate-900">{perm.label}</p>
+                      <p className="font-semibold text-slate-900">
+                        {perm.label}{' '}
+                        {perm.isCustom && (
+                          <span className="ml-1 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-[#1D4ED8]">
+                            Custom
+                          </span>
+                        )}
+                      </p>
                       <p className="text-slate-500">{perm.description}</p>
                     </div>
                   </label>
@@ -749,14 +898,86 @@ export function SuperAdminStaffPage() {
         }}
       />
 
+      <CustomPermissionModal
+        open={permModalOpen}
+        onClose={() => setPermModalOpen(false)}
+        scopeLabel="Super Admin Staff"
+        existingPermissions={customPermissions}
+        onCreate={async (input) => {
+          if (!userProfile) {
+            throw new Error('Super Admin profile is not loaded yet.');
+          }
+          try {
+            const created = await createCustomPermission(
+              {
+                scope: 'platform',
+                ...input,
+              },
+              userProfile
+            );
+            setCustomPermissions((prev) =>
+              prev.some((p) => p.key === created.key) ? prev : [...prev, created]
+            );
+            if (modalOpen) {
+              setPermissions((prev) =>
+                prev.includes(created.key) ? prev : [...prev, created.key]
+              );
+            }
+            showToast(
+              'New permission added',
+              'success',
+              `${created.label} is now visible in Add Staff & Edit Staff.`
+            );
+          } catch (err) {
+            showToast(
+              'Failed to add permission',
+              'error',
+              err instanceof Error ? err.message : undefined
+            );
+            throw err;
+          }
+        }}
+        onDelete={async (perm) => {
+          if (!userProfile) return;
+          try {
+            await deleteCustomPermission(perm.id, perm.label, undefined, userProfile);
+            setCustomPermissions((prev) => prev.filter((p) => p.id !== perm.id));
+            setPermissions((prev) => prev.filter((p) => p !== perm.key));
+            showToast('Custom permission removed', 'success', perm.label);
+          } catch (err) {
+            showToast(
+              'Delete failed',
+              'error',
+              err instanceof Error ? err.message : undefined
+            );
+          }
+        }}
+      />
+
+      <PdfExportModal
+        open={pdfModalOpen}
+        onClose={() => setPdfModalOpen(false)}
+        title="Export Super Admin Staff PDF"
+        extraFilterLabel="Account Status"
+        extraFilterOptions={[
+          { label: 'All Statuses', value: 'all' },
+          { label: 'Active', value: 'active' },
+          { label: 'Pending', value: 'pending' },
+          { label: 'Inactive', value: 'inactive' },
+          { label: 'Suspended', value: 'suspended' },
+        ]}
+        getMatchCount={(f) => filterStaffForPdf(f).length}
+        onExport={handlePdfExport}
+      />
+
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDelete}
         loading={saving}
-        title="Remove Super Admin Staff"
-        message={`Remove "${deleteTarget?.name}" from Super Admin Staff?`}
-        confirmLabel="Remove Staff"
+        title="Delete Super Admin Staff"
+        message={`Permanently delete "${deleteTarget?.name}" and revoke all login access, credentials, and permissions?`}
+        confirmLabel="Delete Staff"
       />
     </DashboardLayout>
   );

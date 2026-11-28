@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Download, Plus, XCircle } from 'lucide-react';
+import { CheckCircle2, Download, Eye, Plus, Receipt, XCircle } from 'lucide-react';
 import { DashboardLayout } from '../../components/layout/DashboardLayout';
 import { ColumnDef, DataTable } from '../../components/common/DataTable';
 import { Modal } from '../../components/common/Modal';
+import { PdfExportModal, PdfFilterValues } from '../../components/common/PdfExportModal';
 import { StatusLabel } from '../../components/common/StatusBadge';
 import { DemoDataBanner } from '../../components/common/DemoDataBanner';
 import { useAuth } from '../../context/AuthContext';
@@ -15,12 +16,19 @@ import {
   listPublicSubscriptionPlans,
   verifyPaymentAndActivateSubscription,
 } from '../../services/subscriptions/subscriptionService';
-import { exportTableToPdf } from '../../services/reports/pdfService';
+import { exportPaymentReceiptPdf, exportTableToPdf } from '../../services/reports/pdfService';
 import { BillingCycle, Organization, PaymentRecord, SubscriptionPlan } from '../../types';
-import { DEMO_PAYMENTS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
+import { DEMO_ORGANIZATIONS, DEMO_PAYMENTS, SAMPLE_SUBSCRIPTION_PLANS } from '../../utils/demoData';
+import { isSafeImageDataUrl } from '../../utils/imageHelpers';
+import {
+  formatCurrencyAmount,
+  formatCurrencyForPdf,
+  formatDisplayDate,
+  matchesDateFilter,
+} from '../../utils/subscriptionHelpers';
 
 export function PaymentsPage() {
-  const { userProfile, hasPermission } = useAuth();
+  const { userProfile, firebaseUser, hasPermission } = useAuth();
   const { showToast } = useToast();
 
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
@@ -33,17 +41,20 @@ export function PaymentsPage() {
   const [statusFilter, setStatusFilter] = useState('all');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [pdfModalOpen, setPdfModalOpen] = useState(false);
   const [orgId, setOrgId] = useState('');
   const [planId, setPlanId] = useState('');
   const [billingCycle, setBillingCycle] = useState<BillingCycle>('yearly');
-  const [amount, setAmount] = useState('470');
+  const [amount, setAmount] = useState('13999');
   const [referenceCode, setReferenceCode] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [proofPayment, setProofPayment] = useState<PaymentRecord | null>(null);
 
   const isSuperAdmin = userProfile?.role === 'super_admin';
 
   const loadData = useCallback(async () => {
+    if (!userProfile || !firebaseUser) return;
     setLoading(true);
     try {
       const canListOrgs =
@@ -68,11 +79,12 @@ export function PaymentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast, isSuperAdmin, hasPermission]);
+  }, [showToast, isSuperAdmin, hasPermission, userProfile, firebaseUser]);
 
   useEffect(() => {
+    if (!userProfile || !firebaseUser) return;
     void loadData();
-  }, [loadData]);
+  }, [loadData, userProfile, firebaseUser]);
 
   const activeData = demoPreview ? DEMO_PAYMENTS : payments;
 
@@ -104,7 +116,7 @@ export function PaymentsPage() {
           planId: plan.id,
           planName: plan.name,
           amount: Number(amount) || 0,
-          currency: 'USD',
+          currency: 'INR',
           billingCycle,
           referenceCode,
           verificationStatus: 'Pending Verification',
@@ -139,16 +151,43 @@ export function PaymentsPage() {
     }
   };
 
-  const handleExportPdf = () => {
+  const companyOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    (demoPreview ? DEMO_ORGANIZATIONS : orgs).forEach((o) => map.set(o.id, o.name));
+    activeData.forEach((p) => {
+      if (!map.has(p.organizationId)) map.set(p.organizationId, p.organizationName);
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [demoPreview, orgs, activeData]);
+
+  const filterPaymentsForPdf = (filters: PdfFilterValues) => {
+    return activeData.filter((p) => {
+      if (filters.dateFilter.mode !== 'all' && !matchesDateFilter(p.createdAt, filters.dateFilter)) {
+        return false;
+      }
+      if (filters.companyId !== 'all' && p.organizationId !== filters.companyId) {
+        return false;
+      }
+      if (filters.extraFilter !== 'all' && p.verificationStatus !== filters.extraFilter) {
+        return false;
+      }
+      return true;
+    });
+  };
+
+  const handleExportPdf = (filters: PdfFilterValues, filterSummary: string) => {
+    const rowsData = filterPaymentsForPdf(filters);
     exportTableToPdf({
       title: 'Subscription Payment Verification Ledger',
+      subtitle: `${demoPreview ? 'Demo Preview' : 'Live Ledger'}  |  ${filterSummary}`,
       generatedBy: userProfile?.email || 'Super Admin',
-      columns: ['Organization', 'Plan', 'Cycle', 'Amount', 'Reference', 'Verification'],
-      rows: filtered.map((p) => [
+      columns: ['Date', 'Company / Society', 'Plan', 'Cycle', 'Amount', 'Reference', 'Status'],
+      rows: rowsData.map((p) => [
+        formatDisplayDate(p.createdAt),
         p.organizationName,
         p.planName,
-        p.billingCycle,
-        `${p.currency} ${p.amount}`,
+        p.billingCycle.replace('_', '-'),
+        formatCurrencyForPdf(p.amount, p.currency),
         p.referenceCode,
         p.verificationStatus,
       ]),
@@ -165,7 +204,10 @@ export function PaymentsPage() {
       render: (p) => (
         <div>
           <p className="font-semibold text-slate-900">{p.organizationName}</p>
-          <p className="font-mono text-xs text-slate-500">{p.referenceCode}</p>
+          <p className="font-mono text-xs text-slate-500">
+            {p.referenceCode}
+            {p.paymentMethod ? ` · ${p.paymentMethod}` : ''}
+          </p>
         </div>
       ),
     },
@@ -185,7 +227,7 @@ export function PaymentsPage() {
       align: 'right',
       render: (p) => (
         <span className="font-mono font-semibold text-slate-900 tabular-nums">
-          {p.currency} {p.amount}
+          {formatCurrencyAmount(p.amount, p.currency)}
         </span>
       ),
     },
@@ -195,34 +237,61 @@ export function PaymentsPage() {
       render: (p) => <StatusLabel status={p.verificationStatus} />,
     },
     {
+      key: 'proof',
+      header: 'Payment Proof',
+      render: (p) =>
+        isSafeImageDataUrl(p.paymentProofDataUrl) ? (
+          <button
+            type="button"
+            onClick={() => setProofPayment(p)}
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+          >
+            <Eye className="h-3.5 w-3.5" />
+            <span>View Proof</span>
+          </button>
+        ) : (
+          <span className="text-xs text-slate-400">No proof</span>
+        ),
+    },
+    {
       key: 'actions',
       header: 'Super Admin Action',
       align: 'right',
-      render: (p) =>
-        demoPreview ? (
-          <span className="text-xs text-slate-400">Preview only</span>
-        ) : isSuperAdmin && p.verificationStatus === 'Pending Verification' ? (
-          <div className="inline-flex items-center gap-1.5">
+      render: (p) => {
+        const matchedOrg = orgs.find((o) => o.id === p.organizationId) || null;
+        return (
+          <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+            {!demoPreview && isSuperAdmin && p.verificationStatus === 'Pending Verification' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handleVerify(p, 'Verified')}
+                  className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span>Verify & Activate</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleVerify(p, 'Rejected')}
+                  className="inline-flex items-center gap-1 rounded-md border border-rose-200 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                >
+                  <XCircle className="h-3.5 w-3.5" />
+                  <span>Reject</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
-              onClick={() => void handleVerify(p, 'Verified')}
-              className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
+              onClick={() => exportPaymentReceiptPdf(p, matchedOrg)}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
             >
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              <span>Verify & Activate</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleVerify(p, 'Rejected')}
-              className="inline-flex items-center gap-1 rounded-md border border-rose-200 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-            >
-              <XCircle className="h-3.5 w-3.5" />
-              <span>Reject</span>
+              <Receipt className="h-3.5 w-3.5 text-[#1D4ED8]" />
+              <span>Receipt</span>
             </button>
           </div>
-        ) : (
-          <span className="text-xs text-slate-500">{p.verifiedBy || 'Recorded'}</span>
-        ),
+        );
+      },
     },
   ];
 
@@ -234,7 +303,7 @@ export function PaymentsPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={handleExportPdf}
+            onClick={() => setPdfModalOpen(true)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
           >
             <Download className="h-4 w-4" />
@@ -350,7 +419,9 @@ export function PaymentsPage() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="block text-xs font-semibold text-slate-700">Amount (USD) *</label>
+              <label className="block text-xs font-semibold text-slate-700">
+                Amount (₹ / INR) *
+              </label>
               <input
                 type="number"
                 min={0}
@@ -369,7 +440,7 @@ export function PaymentsPage() {
                 required
                 value={referenceCode}
                 onChange={(e) => setReferenceCode(e.target.value)}
-                placeholder="INV-2026-001"
+                placeholder="UTR-2026-001"
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
               />
             </div>
@@ -402,6 +473,133 @@ export function PaymentsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      <PdfExportModal
+        open={pdfModalOpen}
+        onClose={() => setPdfModalOpen(false)}
+        title="Export Payments Ledger PDF"
+        companies={companyOptions}
+        extraFilterLabel="Verification Status"
+        extraFilterOptions={[
+          { label: 'All Statuses', value: 'all' },
+          { label: 'Pending Verification', value: 'Pending Verification' },
+          { label: 'Verified', value: 'Verified' },
+          { label: 'Rejected', value: 'Rejected' },
+        ]}
+        getMatchCount={(f) => filterPaymentsForPdf(f).length}
+        onExport={handleExportPdf}
+      />
+
+      <Modal
+        open={Boolean(proofPayment)}
+        onClose={() => setProofPayment(null)}
+        title="Customer Payment Proof & Reconciliation"
+        subtitle={
+          proofPayment
+            ? `${proofPayment.organizationName} · Ref: ${proofPayment.referenceCode} · ${formatCurrencyAmount(proofPayment.amount, proofPayment.currency)}`
+            : undefined
+        }
+        maxWidth="lg"
+      >
+        {proofPayment && (
+          <div className="space-y-4">
+            <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3.5 text-xs sm:grid-cols-2">
+              <div>
+                <span className="text-slate-500">Company / Society</span>
+                <p className="font-semibold text-slate-900">{proofPayment.organizationName}</p>
+              </div>
+              <div>
+                <span className="text-slate-500">Plan &amp; Cycle</span>
+                <p className="font-semibold text-slate-900">
+                  {proofPayment.planName} ({proofPayment.billingCycle.replace('_', '-')})
+                </p>
+              </div>
+              <div>
+                <span className="text-slate-500">UTR / Reference Code</span>
+                <p className="font-mono font-semibold text-slate-900">
+                  {proofPayment.referenceCode}
+                </p>
+              </div>
+              <div>
+                <span className="text-slate-500">Amount &amp; Mode</span>
+                <p className="font-semibold text-slate-900">
+                  {formatCurrencyAmount(proofPayment.amount, proofPayment.currency)}
+                  {proofPayment.paymentMethod ? ` · ${proofPayment.paymentMethod}` : ''}
+                </p>
+              </div>
+            </div>
+
+            {isSafeImageDataUrl(proofPayment.paymentProofDataUrl) ? (
+              <div className="flex justify-center rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <img
+                  src={proofPayment.paymentProofDataUrl}
+                  alt={`Payment proof from ${proofPayment.organizationName}`}
+                  className="max-h-[58vh] w-auto rounded-lg object-contain"
+                />
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-center text-xs text-slate-500">
+                No payment proof screenshot attached.
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {isSafeImageDataUrl(proofPayment.paymentProofDataUrl) && (
+                  <a
+                    href={proofPayment.paymentProofDataUrl}
+                    download={`payment-proof-${proofPayment.referenceCode}.png`}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download Proof</span>
+                  </a>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {!demoPreview &&
+                  isSuperAdmin &&
+                  proofPayment.verificationStatus === 'Pending Verification' && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = proofPayment;
+                          setProofPayment(null);
+                          void handleVerify(target, 'Verified');
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        <span>Verify &amp; Activate</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = proofPayment;
+                          setProofPayment(null);
+                          void handleVerify(target, 'Rejected');
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                      >
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>Reject</span>
+                      </button>
+                    </>
+                  )}
+                <button
+                  type="button"
+                  onClick={() => setProofPayment(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </Modal>
     </DashboardLayout>
   );
